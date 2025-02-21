@@ -1,0 +1,90 @@
+1
+00:00:01,020 --> 00:00:03,219
+英文：Lesson 33.
+中文：课33。
+
+2
+00:00:03,520 --> 00:00:05,780
+英文：A fine day.
+中文：好天气。
+
+3
+00:00:06,800 --> 00:00:11,520
+英文：Listen to the tape, then answer this question.
+中文：听录音，然后回答问题。
+
+4
+00:00:13,720 --> 00:00:16,160
+英文：Where is the Jones family?
+中文：琼斯一家在哪里？
+
+5
+00:00:17,960 --> 00:00:21,000
+英文：It is a fine day today.
+中文：今天天气不错。
+
+6
+00:00:22,280 --> 00:00:25,059
+英文：There are some clouds in the sky.
+中文：天空中有一些云。
+
+7
+00:00:25,160 --> 00:00:29,080
+英文：But the sun is shining.
+中文：但阳光灿烂。
+
+8
+00:00:31,519 --> 00:00:31,879
+英文：Mr.
+中文：先生。
+
+9
+00:00:31,980 --> 00:00:35,019
+英文：Jones is with his family.
+中文：琼斯和他的家人在一起。
+
+10
+00:00:36,140 --> 00:00:39,820
+英文：They are walking over the bridge.
+中文：他们正在过桥。
+
+11
+00:00:40,939 --> 00:00:44,599
+英文：There are some boats on the river.
+中文：河上有一些船。
+
+12
+00:00:46,460 --> 00:00:47,600
+英文：Mr.
+中文：先生。
+
+13
+00:00:47,700 --> 00:00:51,739
+英文：Jones and his wife are looking at them.
+中文：琼斯和他的妻子正在看他们。
+
+14
+00:00:52,799 --> 00:00:57,539
+英文：Sally is looking at a big ship.
+中文：萨莉正看着一艘大船。
+
+15
+00:00:58,500 --> 00:01:02,959
+英文：The ship is going under the bridge.
+中文：船正在桥下行驶。
+
+16
+00:01:04,700 --> 00:01:08,459
+英文：Tim is looking at an aeroplane.
+中文：蒂姆正在看一架飞机。
+
+17
+00:01:09,540 --> 00:01:14,459
+英文：The aeroplane is flying over the river.
+中文：飞机正在河上飞行。
+
+18
+00:01:21,439 --> 00:01:22,819
+英文：The ship is flying over the river.
+中文：船正飞过河。
+

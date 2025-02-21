@@ -1,0 +1,105 @@
+1
+00:00:07,600 --> 00:00:11,360
+英文：Listen to the tape, then answer this question.
+中文：听录音，然后回答问题。
+
+2
+00:00:13,280 --> 00:00:16,160
+英文：Who called out to the thieves in the dark?
+中文：谁在黑暗中向小偷喊话？
+
+3
+00:00:18,600 --> 00:00:19,900
+英文：Do you like stories?
+中文：你喜欢故事吗？
+
+4
+00:00:20,739 --> 00:00:23,359
+英文：I want to tell you a true story.
+中文：我想告诉你一个真实的故事。
+
+5
+00:00:23,800 --> 00:00:26,879
+英文：It happened to a friend of mine a year ago.
+中文：一年前，我的一个朋友也遇到了这种情况。
+
+6
+00:00:27,739 --> 00:00:34,279
+英文：While my friend George was reading in bed, two thieves climbed into his kitchen.
+中文：当我的朋友乔治在床上看书时，两个小偷爬进了他的厨房。
+
+7
+00:00:35,100 --> 00:00:39,859
+英文：After they had entered the house, they went into the dining room.
+中文：他们进屋后，走进餐厅。
+
+8
+00:00:40,960 --> 00:00:44,899
+英文：It was very dark, so they turned on a torch.
+中文：天很黑，所以他们打开了手电筒。
+
+9
+00:00:46,119 --> 00:00:48,919
+英文：Suddenly, they heard a voice behind them.
+中文：突然，他们听到身后有个声音。
+
+10
+00:00:50,000 --> 00:00:50,739
+英文：What's up?
+中文：怎么了？
+
+11
+00:00:50,979 --> 00:00:51,600
+英文：What's up?
+中文：怎么了？
+
+12
+00:00:51,700 --> 00:00:52,679
+英文：Someone called.
+中文：有人打电话来。
+
+13
+00:00:53,179 --> 00:00:57,820
+英文：The thieves dropped the torch and ran away as quickly as they could.
+中文：小偷们扔下火把，以最快的速度逃走了。
+
+14
+00:00:58,920 --> 00:01:02,339
+英文：George heard the noise and came downstairs quickly.
+中文：乔治听到声音，迅速下楼。
+
+15
+00:01:03,359 --> 00:01:07,159
+英文：He turned on the light, but he couldn't see anyone.
+中文：他打开了灯，但看不见任何人。
+
+16
+00:01:07,959 --> 00:01:10,079
+英文：The thieves had already gone.
+中文：小偷已经走了。
+
+17
+00:01:11,019 --> 00:01:14,480
+英文：But George's parrot Henry was still there.
+中文：但乔治的鹦鹉亨利还在那里。
+
+18
+00:01:15,060 --> 00:01:16,379
+英文：What's up, George?
+中文：怎么了，乔治？
+
+19
+00:01:16,500 --> 00:01:17,200
+英文：he called.
+中文：他打电话来。
+
+20
+00:01:17,960 --> 00:01:20,759
+英文：Nothing Henry George said and smiled.
+中文：亨利·乔治什么也没说，只是笑了。
+
+21
+00:01:20,939 --> 00:01:22,239
+英文：Go back to sleep.
+中文：回去睡吧。
+

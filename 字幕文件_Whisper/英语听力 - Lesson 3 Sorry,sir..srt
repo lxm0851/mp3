@@ -1,0 +1,56 @@
+1
+00:00:02,659 --> 00:00:09,600
+Listen to the tape, then answer this question.
+
+2
+00:00:11,240 --> 00:00:14,500
+Does the man get his umbrella back?
+
+3
+00:00:16,859 --> 00:00:20,060
+My coat and my umbrella, please.
+
+4
+00:00:21,660 --> 00:00:23,240
+Here is my ticket.
+
+5
+00:00:25,789 --> 00:00:26,619
+Thank you, sir.
+
+6
+00:00:26,719 --> 00:00:31,440
+Number 5.
+
+7
+00:00:33,240 --> 00:00:36,739
+Here's your umbrella and your coat.
+
+8
+00:00:38,179 --> 00:00:41,399
+This is not my umbrella.
+
+9
+00:00:42,200 --> 00:00:43,339
+Sorry, sir.
+
+10
+00:00:45,420 --> 00:00:47,359
+Is this your umbrella?
+
+11
+00:00:48,560 --> 00:00:51,119
+No, it isn't.
+
+12
+00:00:52,740 --> 00:00:53,879
+Is this it?
+
+13
+00:00:53,979 --> 00:00:58,000
+Yes, it is.
+
+14
+00:00:58,780 --> 00:01:00,859
+Thank you very much.
+

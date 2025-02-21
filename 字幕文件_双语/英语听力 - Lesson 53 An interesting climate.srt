@@ -1,0 +1,85 @@
+1
+00:00:06,620 --> 00:00:11,280
+英文：Listen to the tape, then answer this question.
+中文：听录音，然后回答问题。
+
+2
+00:00:12,120 --> 00:00:17,400
+英文：What is the favourite subject of conversation in England?
+中文：在英国，人们最喜欢谈论的话题是什么？
+
+3
+00:00:20,500 --> 00:00:22,440
+英文：Where do you come from?
+中文：你来自哪里？
+
+4
+00:00:23,780 --> 00:00:25,820
+英文：I come from England.
+中文：我来自英国。
+
+5
+00:00:27,160 --> 00:00:30,580
+英文：What is the climate like in your country?
+中文：你们国家的气候怎么样？
+
+6
+00:00:31,500 --> 00:00:35,500
+英文：It's mild, but it's not always pleasant.
+中文：天气温和，但并不总是令人愉快。
+
+7
+00:00:36,820 --> 00:00:41,839
+英文：The weather is often cold in the north and windy in the east.
+中文：北方的天气通常很冷，东部有风。
+
+8
+00:00:42,520 --> 00:00:47,619
+英文：It's often wet in the west and sometimes warm in the south.
+中文：西部经常潮湿，南部有时温暖。
+
+9
+00:00:49,460 --> 00:00:52,219
+英文：Which seasons do you like best?
+中文：你最喜欢哪个季节？
+
+10
+00:00:53,000 --> 00:00:55,939
+英文：I like spring and summer.
+中文：我喜欢春天和夏天。
+
+11
+00:00:56,619 --> 00:01:00,019
+英文：The days are long and the nights are short.
+中文：白天很长，夜晚很短。
+
+12
+00:01:00,600 --> 00:01:04,180
+英文：The sun rises early and sets late.
+中文：太阳升得早，落得晚。
+
+13
+00:01:05,340 --> 00:01:08,299
+英文：I don't like autumn and winter.
+中文：我不喜欢秋天和冬天。
+
+14
+00:01:09,099 --> 00:01:12,759
+英文：The days are short and the nights are long.
+中文：白天很短，夜晚很长。
+
+15
+00:01:13,700 --> 00:01:16,719
+英文：The sun rises late and sets early.
+中文：太阳升得晚，落得早。
+
+16
+00:01:16,819 --> 00:01:23,359
+英文：Our climate is not very good, but it's certainly interesting.
+中文：我们的气候不是很好，但确实很有趣。
+
+17
+00:01:23,980 --> 00:01:27,000
+英文：It's our favourite subject of conversation.
+中文：这是我们最喜欢的话题。
+

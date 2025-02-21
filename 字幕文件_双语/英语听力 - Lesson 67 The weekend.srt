@@ -1,0 +1,100 @@
+1
+00:00:03,899 --> 00:00:08,640
+英文：Listen to the tape.
+中文：听录音。
+
+2
+00:00:09,000 --> 00:00:11,200
+英文：Then answer this question.
+中文：然后回答这个问题。
+
+3
+00:00:12,900 --> 00:00:17,280
+英文：What are the Johnson's going to do at the weekend?
+中文：约翰逊一家周末打算做什么？
+
+4
+00:00:19,439 --> 00:00:20,580
+英文：Hello.
+中文：你好。
+
+5
+00:00:20,859 --> 00:00:23,039
+英文：Were you at the butchers?
+中文：你在肉铺吗？
+
+6
+00:00:23,399 --> 00:00:24,920
+英文：Yes, I was.
+中文：是的，我是。
+
+7
+00:00:25,160 --> 00:00:26,619
+英文：Were you at the butchers too?
+中文：你也去肉铺了吗？
+
+8
+00:00:26,719 --> 00:00:29,559
+英文：No, I wasn't.
+中文：不，我没有。
+
+9
+00:00:29,660 --> 00:00:31,839
+英文：I was at the green grocers.
+中文：我在绿色杂货店。
+
+10
+00:00:32,500 --> 00:00:34,099
+英文：How's Jimmy today?
+中文：吉米今天怎么样？
+
+11
+00:00:35,259 --> 00:00:37,099
+英文：He's very well, thank you.
+中文：他很好，谢谢你。
+
+12
+00:00:38,039 --> 00:00:40,479
+英文：Was he absent from school last week?
+中文：他上周没来上学吗？
+
+13
+00:00:41,560 --> 00:00:43,099
+英文：Yes, he was.
+中文：是的，他是。
+
+14
+00:00:43,560 --> 00:00:48,939
+英文：He was absent on Monday, Tuesday, Wednesday and Thursday.
+中文：他周一、周二、周三和周四缺席。
+
+15
+00:00:49,460 --> 00:00:50,939
+英文：How are you all keeping?
+中文：你们都过得怎么样？
+
+16
+00:00:51,039 --> 00:00:53,599
+英文：Very well, thank you.
+中文：很好，谢谢。
+
+17
+00:00:54,000 --> 00:00:56,640
+英文：We're going to spend three days in the country.
+中文：我们打算在乡下呆三天。
+
+18
+00:00:56,880 --> 00:00:59,719
+英文：We're going to stay at my mother's for the weekend.
+中文：我们打算周末住在我妈妈家。
+
+19
+00:01:00,899 --> 00:01:04,180
+英文：Friday, Saturday and Sunday in the country.
+中文：星期五、星期六和星期日在国内。
+
+20
+00:01:04,560 --> 00:01:05,840
+英文：Aren't you lucky?
+中文：你是不是很幸运？
+

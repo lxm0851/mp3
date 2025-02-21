@@ -1,0 +1,64 @@
+1
+00:00:06,520 --> 00:00:11,140
+Listen to the tape, then answer this question.
+
+2
+00:00:13,030 --> 00:00:16,400
+Is the cat climbing the tree?
+
+3
+00:00:18,839 --> 00:00:20,500
+Where's Sally Jack?
+
+4
+00:00:21,879 --> 00:00:24,220
+She's in the garden, Jean.
+
+5
+00:00:25,899 --> 00:00:26,979
+What's she doing?
+
+6
+00:00:27,079 --> 00:00:31,220
+She's sitting under the tree.
+
+7
+00:00:32,259 --> 00:00:34,859
+Is Tim in the garden, too?
+
+8
+00:00:35,740 --> 00:00:38,119
+Yes, he is.
+
+9
+00:00:38,880 --> 00:00:41,299
+He's climbing the tree.
+
+10
+00:00:42,679 --> 00:00:44,579
+I beg your pardon.
+
+11
+00:00:45,899 --> 00:00:47,820
+Who's climbing the tree?
+
+12
+00:00:48,500 --> 00:00:49,979
+Tim is.
+
+13
+00:00:51,579 --> 00:00:52,859
+What about the dog?
+
+14
+00:00:52,960 --> 00:00:56,939
+The dog's in the garden, too.
+
+15
+00:00:57,920 --> 00:01:00,579
+It's running across the grass.
+
+16
+00:01:01,640 --> 00:01:04,599
+It's running after a cat.
+

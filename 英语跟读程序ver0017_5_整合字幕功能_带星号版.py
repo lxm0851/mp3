@@ -771,6 +771,779 @@ class SubtitleGeneratorWindow:
         self.update_progress_text("已停止生成字幕")
 
 
+import tkinter as tk
+from tkinter import ttk, messagebox
+import pygame
+from tkinter import filedialog
+import os
+import json
+
+# 自然排序处理
+from natsort import natsorted
+import re
+
+import speech_recognition as sr
+import threading
+import time
+import wave
+import contextlib
+import logging
+import numpy as np
+import whisper
+import pyaudio
+import sys
+
+import hashlib
+import random
+import requests
+from pathlib import Path
+
+from text_to_subtitle_ver0010 import WhisperSubtitleGenerator
+
+import shutil
+import subprocess
+import glob
+
+import logging as logger
+
+import sounddevice as sd
+import wavio
+import os
+import time
+from pydub import AudioSegment
+from pydub.playback import play
+from pydub.effects import normalize
+
+
+def record_audio(filename, duration=5, sample_rate=44100):
+    """
+    录音功能，保存为WAV文件
+    :param filename: 保存的文件名
+    :param duration: 录音时长（秒）
+    :param sample_rate: 采样率
+    """
+    try:
+        print(f"开始录音，持续 {duration} 秒...")
+        recording = sd.rec(int(duration * sample_rate), samplerate=sample_rate, channels=1, dtype='int16')
+        sd.wait()  # 等待录音完成
+        wavio.write(filename, recording, sample_rate, sampwidth=2)
+        print(f"录音已保存为 {filename}")
+        return True
+    except Exception as e:
+        print(f"录音失败: {e}")
+        return False
+
+
+def check_ffmpeg():
+    """检查 ffmpeg 是否可用"""
+    if shutil.which("ffmpeg") is None:
+        raise Exception("未找到 ffmpeg，请确保已安装并添加到环境变量")
+
+
+def safe_call(func):
+    """安全调用装饰器，捕获异常并更新状态栏"""
+
+    def wrapper(self, *args, **kwargs):
+        try:
+            return func(self, *args, **kwargs)
+        except Exception as e:
+            logging.error(f"调用函数 {func.__name__} 失败: {e}")
+            self.update_status(f"{func.__name__} 操作失败: {str(e)}", 'error')
+
+    return wrapper
+
+
+def handle_audio_error(func):
+    def wrapper(self, *args, **kwargs):
+        try:
+            return func(self, *args, **kwargs)
+        except pygame.error as e:
+            messagebox.showerror("音频错误", f"操作失败: {str(e)}")
+        except Exception as e:
+            messagebox.showerror("错误", f"未知错误: {str(e)}")
+
+    return wrapper
+
+
+class SubtitleGeneratorWindow:
+    def __init__(self, parent):
+        self.window = tk.Toplevel(parent)
+        self.window.title("字幕生成器")
+        self.window.geometry("600x800")
+
+        self.original_app_id = ''
+        self.original_app_key = ''
+
+        # 百度翻译API配置
+        self.api_frame = ttk.LabelFrame(self.window, text="百度翻译API配置")
+        self.api_frame.pack(fill="x", padx=10, pady=5)
+
+        # APP ID 输入框
+        ttk.Label(self.api_frame, text="APP ID:").grid(row=0, column=0, padx=5, pady=5, sticky='e')
+        self.app_id_entry = ttk.Entry(self.api_frame)
+        self.app_id_entry.grid(row=0, column=1, padx=5, pady=5, sticky='ew')
+
+        self.app_id_entry.bind('<FocusOut>', lambda e: self.update_api_config())
+
+        # API Key 输入框
+        ttk.Label(self.api_frame, text="API Key:").grid(row=1, column=0, padx=5, pady=5, sticky='e')
+        self.app_key_entry = ttk.Entry(self.api_frame)
+        self.app_key_entry.grid(row=1, column=1, padx=5, pady=5, sticky='ew')
+
+        self.app_key_entry.bind('<FocusOut>', lambda e: self.update_api_config())
+
+        # 按钮框架（保存和解锁按钮）
+        self.api_button_frame = ttk.Frame(self.api_frame)
+        self.api_button_frame.grid(row=2, column=0, columnspan=5, pady=5, sticky='e')
+
+        # 保存API配置按钮
+        self.save_api_btn = ttk.Button(self.api_button_frame, text="保存API配置", command=self.save_api_config)
+        self.save_api_btn.pack(side="right", padx=5)
+
+        # 解锁按钮，绑定到 unlock_entry 方法
+        self.unlock_api_btn = ttk.Button(
+            self.api_button_frame,
+            text="解锁输入框",
+            command=lambda: self.unlock_all_entries([self.app_id_entry, self.app_key_entry])
+        )
+        self.unlock_api_btn.pack(side="right", padx=5)
+
+        # 路径选择
+        self.path_frame = ttk.LabelFrame(self.window, text="路径设置")
+        self.path_frame.pack(fill="x", padx=10, pady=5)
+
+        ttk.Label(self.path_frame, text="音频文件夹:").grid(row=0, column=0, padx=5, pady=5)
+        self.audio_path_var = tk.StringVar()
+        self.audio_path_entry = ttk.Entry(self.path_frame, textvariable=self.audio_path_var)
+        self.audio_path_entry.grid(row=0, column=1, padx=5, pady=5)
+        ttk.Button(self.path_frame, text="选择", command=self.select_audio_path).grid(row=0, column=2, padx=5, pady=5)
+
+        ttk.Label(self.path_frame, text="输出文件夹:").grid(row=1, column=0, padx=5, pady=5)
+        self.output_path_var = tk.StringVar()
+        self.output_path_entry = ttk.Entry(self.path_frame, textvariable=self.output_path_var)
+        self.output_path_entry.grid(row=1, column=1, padx=5, pady=5)
+        ttk.Button(self.path_frame, text="选择", command=self.select_output_path).grid(row=1, column=2, padx=5, pady=5)
+
+        # 进度显示
+        self.progress_frame = ttk.LabelFrame(self.window, text="生成进度")
+        self.progress_frame.pack(fill="both", expand=True, padx=10, pady=5)
+
+        self.progress_text = tk.Text(self.progress_frame, height=10)
+        self.progress_text.pack(fill="both", expand=True, padx=5, pady=5)
+
+        self.progress_bar = ttk.Progressbar(self.progress_frame, mode='determinate')
+        self.progress_bar.pack(fill="x", padx=5, pady=5)
+
+        # 控制按钮
+        self.button_frame = ttk.Frame(self.window)
+        self.button_frame.pack(fill="x", padx=10, pady=5)
+
+        self.generate_btn = ttk.Button(self.button_frame, text="开始生成", command=self.start_generate)
+        self.generate_btn.pack(side="right", padx=5)
+
+        self.stop_btn = ttk.Button(self.button_frame, text="停止生成", command=self.stop_generate, state='disabled')
+        self.stop_btn.pack(side="right", padx=5)
+
+        self.setup_logging()
+        self.load_api_config()
+        self.generator = WhisperSubtitleGenerator()
+
+        self.create_context_menus()
+        self.bind_shortcuts()
+
+        self.window.protocol("WM_DELETE_WINDOW", self.on_closing)
+        self.is_generating = False
+
+    def create_context_menus(self):
+        """为所有输入框创建右键菜单"""
+        entries = [
+            self.app_id_entry,
+            self.app_key_entry,
+            self.audio_path_entry,  # 使用 entry
+            self.output_path_entry  # 使用 entry
+        ]
+
+        for entry in entries:
+            if isinstance(entry, (tk.Entry, ttk.Entry)):
+                menu = tk.Menu(self.window, tearoff=0)
+                menu.add_command(label="剪切", command=lambda e=entry: self.cut_text(e))
+                menu.add_command(label="复制", command=lambda e=entry: self.copy_text(e))
+                menu.add_command(label="粘贴", command=lambda e=entry: self.paste_text(e))
+                menu.add_separator()
+                menu.add_command(label="全选", command=lambda e=entry: self.select_all(e))
+
+                entry.bind("<Button-3>", lambda e, m=menu: self.show_context_menu(e, m))
+            else:
+                logging.warning(f"尝试创建上下文菜单到非Entry对象: {entry}")
+
+    def bind_shortcuts(self):
+        """绑定快捷键"""
+        entries = [
+            self.app_id_entry,
+            self.app_key_entry,
+            self.audio_path_entry,
+            self.output_path_entry
+        ]
+
+        for entry in entries:
+            if isinstance(entry, (tk.Entry, ttk.Entry)):
+                # 检查焦点
+                def focus_check(widget, callback):
+                    if widget == widget.winfo_toplevel().focus_get():
+                        callback(widget)
+
+                # Windows/Linux 快捷键
+                entry.bind('<Control-a>', lambda e: focus_check(e.widget, self.select_all))
+                entry.bind('<Control-A>', lambda e: focus_check(e.widget, self.select_all))
+                entry.bind('<Control-c>', lambda e: focus_check(e.widget, self.copy_text))
+                entry.bind('<Control-C>', lambda e: focus_check(e.widget, self.copy_text))
+                entry.bind('<Control-v>', lambda e: focus_check(e.widget, self.paste_text))
+                entry.bind('<Control-V>', lambda e: focus_check(e.widget, self.paste_text))
+                entry.bind('<Control-x>', lambda e: focus_check(e.widget, self.cut_text))
+                entry.bind('<Control-X>', lambda e: focus_check(e.widget, self.cut_text))
+
+                # Mac 快捷键
+                entry.bind('<Command-a>', lambda e: focus_check(e.widget, self.select_all))
+                entry.bind('<Command-A>', lambda e: focus_check(e.widget, self.select_all))
+                entry.bind('<Command-c>', lambda e: focus_check(e.widget, self.copy_text))
+                entry.bind('<Command-C>', lambda e: focus_check(e.widget, self.copy_text))
+                entry.bind('<Command-v>', lambda e: focus_check(e.widget, self.paste_text))
+                entry.bind('<Command-V>', lambda e: focus_check(e.widget, self.paste_text))
+                entry.bind('<Command-x>', lambda e: focus_check(e.widget, self.cut_text))
+                entry.bind('<Command-X>', lambda e: focus_check(e.widget, self.cut_text))
+            else:
+                logging.warning(f"尝试绑定快捷键到非Entry对象: {entry}")
+
+    def show_context_menu(self, event, menu):
+        """显示右键菜单"""
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def cut_text(self, entry):
+        """剪切文本"""
+        try:
+            entry.event_generate("<<Cut>>")
+        except Exception as e:
+            logging.error(f"剪切操作失败: {str(e)}")
+            messagebox.showerror("错误", f"剪切操作失败: {str(e)}")
+
+    def copy_text(self, entry):
+        """复制文本"""
+        try:
+            entry.event_generate("<<Copy>>")
+        except Exception as e:
+            logging.error(f"复制操作失败: {str(e)}")
+            messagebox.showerror("错误", f"复制操作失败: {str(e)}")
+
+    def paste_text(self, entry):
+        """粘贴文本，包含防抖机制和锁定提示"""
+        try:
+            # 防抖机制：检查最近一次粘贴时间
+            current_time = time.time()
+            if hasattr(entry, 'last_paste_time'):
+                if current_time - entry.last_paste_time < 0.5:  # 0.5秒内禁止重复粘贴
+                    logging.warning(f"粘贴操作过于频繁，忽略本次操作: {entry.winfo_name()}")
+                    self.update_progress_text(f"粘贴操作过于频繁，忽略本次操作: {entry.winfo_name()}")
+                    return
+            entry.last_paste_time = current_time
+
+            # 清空当前选中的文本
+            try:
+                start, end = entry.selection_range()
+                if start != end:
+                    entry.delete(start, end)
+            except:
+                pass
+
+            # 获取剪贴板内容并清理不可见字符
+            clipboard_content = entry.clipboard_get().strip()
+            clipboard_content = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', clipboard_content)
+
+            # 打印粘贴前的值进行调试
+            logging.debug(f"粘贴前的 entry 值: {repr(entry.get())}, 长度: {len(entry.get())}")
+            logging.debug(f"粘贴的 clipboard 内容: {repr(clipboard_content)}, 长度: {len(clipboard_content)}")
+
+            # 清空输入框内容，确保新内容替换旧内容
+            entry.delete(0, 'end')
+
+            # 执行粘贴操作
+            entry.insert(0, clipboard_content)
+
+            # 打印粘贴后的值进行调试
+            logging.debug(f"粘贴后的 entry 值: {repr(entry.get())}, 长度: {len(entry.get())}")
+
+            # 锁定输入框内容，防止意外修改
+            entry.config(state='readonly')
+            entry.locked = True  # 添加标志位
+
+            # 更新进度文本，记录粘贴操作
+            self.update_progress_text(f"已粘贴到输入框: {entry.winfo_name()}")
+
+            # 弹出提示框，告知用户输入框已锁定
+            messagebox.showinfo(
+                "提示",
+                f"输入框 {entry.winfo_name()} 已锁定，防止意外修改。\n点击'解锁'按钮可重新编辑。"
+            )
+
+        except tk.TclError as e:
+            logging.error(f"粘贴操作失败: 剪贴板为空或不可访问 - {str(e)}")
+            messagebox.showerror("错误", "粘贴失败: 剪贴板为空或不可访问")
+            self.update_progress_text(f"粘贴失败: 剪贴板为空或不可访问 - {str(e)}")
+        except Exception as e:
+            logging.error(f"粘贴操作失败: {str(e)}")
+            messagebox.showerror("错误", f"粘贴操作失败: {str(e)}")
+            self.update_progress_text(f"粘贴失败: {str(e)}")
+
+    def select_all(self, entry):
+        """全选文本"""
+        try:
+            entry.select_range(0, 'end')
+            entry.icursor('end')  # 将光标移到末尾
+        except Exception as e:
+            logging.error(f"全选操作失败: {str(e)}")
+            messagebox.showerror("错误", f"全选操作失败: {str(e)}")
+
+    def setup_logging(self):
+        """配置日志记录"""
+        log_dir = os.path.join(os.path.expanduser('~'), '.audio_player', 'logs')
+        os.makedirs(log_dir, exist_ok=True)
+
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(os.path.join(log_dir, 'subtitle_generator.log')),
+                logging.StreamHandler()
+            ]
+        )
+
+    def update_progress_text(self, message):
+        """更新进度文本，添加时间戳"""
+        timestamp = time.strftime("%H:%M:%S")
+        self.progress_text.insert('end', f"[{timestamp}] {message}\n")
+        self.progress_text.see('end')
+        self.window.update()
+
+    def update_progress_bar(self, current, total):
+        """更新进度条"""
+        self.progress_bar['value'] = (current / total) * 100
+        self.window.update()
+
+    def on_closing(self):
+        """处理窗口关闭"""
+        if self.is_generating:
+            if not messagebox.askyesno("确认", "正在生成字幕，确定要退出吗？"):
+                return
+        self.window.destroy()
+
+    def clear_progress(self):
+        """清除进度信息"""
+        if messagebox.askyesno("确认", "确定要清除进度信息吗？"):
+            self.progress_text.delete(1.0, 'end')
+            self.progress_bar['value'] = 0
+
+    def load_api_config(self):
+        """加载API配置时添加确认覆盖功能，并清理不可见字符"""
+        config_file = os.path.join(os.path.expanduser('~'), '.audio_player', 'baidu_api_config.json')
+        try:
+            if os.path.exists(config_file):
+                with open(config_file, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+
+                # 获取配置中的 app_id 和 app_key，并清理不可见字符
+                app_id = config.get('app_id', '').strip()
+                app_key = config.get('app_key', '').strip()
+
+                # 清理所有不可见字符，包括换行符、制表符、不可打印字符等
+                app_id = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', app_id)
+                app_key = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', app_key)
+
+                # 存储原始值
+                self.original_app_id = app_id
+                self.original_app_key = app_key
+
+                # 打印日志时显示完整值（保持不变）
+                print('加载的 app_id:', repr(app_id), f'长度: {len(app_id)}')
+                print('加载的 app_key:', repr(app_key), f'长度: {len(app_key)}')
+
+                # 如果输入框中已有内容，询问是否覆盖
+                current_app_id = self.app_id_entry.get().strip()
+                current_app_key = self.app_key_entry.get().strip()
+                if current_app_id or current_app_key:
+                    if not messagebox.askyesno("确认覆盖", "输入框中已有API配置，是否用保存的配置覆盖？"):
+                        self.update_progress_text("已取消覆盖API配置")
+                        return
+
+                # 创建用于前端显示的隐藏版本
+                def mask_sensitive(text):
+                    if len(text) <= 6:  # 如果长度小于等于6，不隐藏
+                        return text
+                    return f"{text[:3]}{'*' * (len(text) - 6)}{text[-3:]}"
+
+                display_app_id = mask_sensitive(app_id)
+                display_app_key = mask_sensitive(app_key)
+
+                # 清空现有内容
+                self.app_id_entry.delete(0, 'end')
+                self.app_key_entry.delete(0, 'end')
+
+                # 插入隐藏后的值用于前端显示
+                self.app_id_entry.insert(0, display_app_id)
+                self.app_key_entry.insert(0, display_app_key)
+
+                # 打印插入后的值（显示实际插入的隐藏值）
+                print('插入后的 app_id:', repr(self.app_id_entry.get()), f'长度: {len(self.app_id_entry.get())}')
+                print('插入后的 app_key:', repr(self.app_key_entry.get()), f'长度: {len(self.app_key_entry.get())}')
+
+                self.update_progress_text("API配置已加载")
+            else:
+                # 如果没有配置文件，也初始化原始值为空
+                self.original_app_id = ''
+                self.original_app_key = ''
+                self.update_progress_text("未找到API配置文件，使用空配置")
+        except json.JSONDecodeError as e:
+            self.original_app_id = ''
+            self.original_app_key = ''
+            messagebox.showerror("错误", f"API配置文件格式错误: {str(e)}")
+            self.update_progress_text(f"加载API配置失败: 配置文件格式错误")
+        except Exception as e:
+            self.original_app_id = ''
+            self.original_app_key = ''
+            messagebox.showerror("错误", f"加载API配置失败: {str(e)}")
+            self.update_progress_text(f"加载API配置失败: {str(e)}")
+
+    # 添加保存配置的方法
+    def save_api_config(self):
+        """保存API配置，始终使用原始值"""
+        config_file = os.path.join(os.path.expanduser('~'), '.audio_player', 'baidu_api_config.json')
+        try:
+            # 确保配置目录存在
+            os.makedirs(os.path.dirname(config_file), exist_ok=True)
+
+            # 获取输入框中的值，仅用于检查是否需要更新
+            display_app_id = self.app_id_entry.get().strip()
+            display_app_key = self.app_key_entry.get().strip()
+
+            # 检查输入框中的值是否是隐藏格式（包含***）
+            def is_masked(text):
+                return '***' in text
+
+            # 如果输入框中的值不是隐藏格式，更新原始值
+            if not is_masked(display_app_id):
+                self.original_app_id = display_app_id
+                logging.info(f"保存前更新 APP ID: {repr(self.original_app_id)}")
+
+            if not is_masked(display_app_key):
+                self.original_app_key = display_app_key
+                logging.info(f"保存前更新 API Key: {repr(self.original_app_key)}")
+
+            # 检查原始值是否为空
+            if not self.original_app_id or not self.original_app_key:
+                logging.error("保存API配置失败: APP ID 或 API Key 不能为空")
+                messagebox.showerror("错误", "APP ID 和 API Key 不能为空")
+                self.update_progress_text("保存API配置失败: APP ID 和 API Key 不能为空")
+                return
+
+            # 打印要保存的原始值进行调试
+            logging.info(f"保存的 app_id: {repr(self.original_app_id)}")
+            logging.info(f"保存的 app_key: {repr(self.original_app_key)}")
+            print(f"保存的 app_id: {repr(self.original_app_id)}")
+            print(f"保存的 app_key: {repr(self.original_app_key)}")
+
+            # 保存配置，使用原始值
+            config = {
+                'app_id': self.original_app_id,
+                'app_key': self.original_app_key
+            }
+
+            with open(config_file, 'w', encoding='utf-8') as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+
+            # 更新输入框显示为隐藏格式
+            def mask_sensitive(text):
+                if len(text) <= 6:
+                    return text
+                return f"{text[:3]}{'*' * (len(text) - 6)}{text[-3:]}"
+
+            self.app_id_entry.delete(0, 'end')
+            self.app_id_entry.insert(0, mask_sensitive(self.original_app_id))
+            self.app_key_entry.delete(0, 'end')
+            self.app_key_entry.insert(0, mask_sensitive(self.original_app_key))
+
+            logging.info("API配置保存成功，输入框已更新为隐藏格式")
+            self.update_progress_text("API配置已保存")
+        except Exception as e:
+            logging.error(f"保存API配置失败: {str(e)}")
+            messagebox.showerror("错误", f"保存API配置失败: {str(e)}")
+            self.update_progress_text(f"保存API配置失败: {str(e)}")
+
+    def unlock_all_entries(self, entries):
+        current_time = time.time()
+        if hasattr(self, 'last_unlock_time'):
+            if current_time - self.last_unlock_time < 0.5:
+                logging.warning("解锁操作过于频繁，忽略本次操作")
+                self.update_progress_text("解锁操作过于频繁，忽略本次操作")
+                return
+        self.last_unlock_time = current_time
+        try:
+            for entry in entries:
+                self.unlock_entry(entry)
+        except Exception as e:
+            logging.error(f"批量解锁输入框失败: {str(e)}")
+            messagebox.showerror("错误", f"批量解锁输入框失败: {str(e)}")
+            self.update_progress_text(f"批量解锁输入框失败: {str(e)}")
+
+    def unlock_entry(self, entry):
+        """解锁指定的输入框，恢复可编辑状态，并在成功解锁后弹出提示"""
+        try:
+            if hasattr(entry, 'locked') and entry.locked:
+                entry.config(state='normal')
+                entry.locked = False
+                self.update_progress_text(f"输入框 {entry.winfo_name()} 已解锁")
+                logging.info(f"输入框 {entry.winfo_name()} 已解锁")
+                # 弹出提示框，告知用户输入框已解锁
+                messagebox.showinfo(
+                    "提示",
+                    f"输入框 {entry.winfo_name()} 已解锁，您现在可以编辑内容。"
+                )
+            else:
+                self.update_progress_text(f"输入框 {entry.winfo_name()} 未锁定，无需解锁")
+                logging.info(f"输入框 {entry.winfo_name()} 未锁定，无需解锁")
+                # 弹出提示框，告知用户输入框未锁定
+                messagebox.showinfo(
+                    "提示",
+                    f"输入框 {entry.winfo_name()} 未锁定，无需解锁。"
+                )
+        except Exception as e:
+            logging.error(f"解锁输入框失败: {str(e)}")
+            messagebox.showerror("错误", f"解锁输入框失败: {str(e)}")
+            self.update_progress_text(f"解锁输入框失败: {str(e)}")
+
+    def select_audio_path(self):
+        path = filedialog.askdirectory(title="选择音频文件夹")
+        if path:
+            if os.access(path, os.R_OK):
+                self.audio_path_var.set(path)
+                self.update_progress_text(f"已选择音频文件夹: {path}")
+            if not self.output_path_var.get():
+                self.output_path_var.set(os.path.join(path, "字幕文件"))
+
+    def select_output_path(self):
+        path = filedialog.askdirectory(title="选择输出文件夹")
+        if path:
+            self.output_path_var.set(path)
+
+    @safe_call
+    def start_generate(self):
+        # 验证API配置
+        if not self.validate_api_config():
+            return
+
+        # 验证输入
+        audio_path = self.audio_path_entry.get().strip()
+        if not audio_path:
+            messagebox.showerror("错误", "请选择音频文件夹")
+            return
+
+        output_path = self.output_path_entry.get().strip()
+        if not output_path:
+            messagebox.showerror("错误", "请选择输出文件夹")
+            return
+
+        if self.is_generating:
+            messagebox.showwarning("警告", "正在处理中，请等待当前任务完成")
+            return
+
+        self.is_generating = True
+        self.generate_btn.config(state='disabled')
+
+        # 自动解锁
+        self.unlock_all_entries([self.app_id_entry, self.app_key_entry])
+
+        # 保存API配置_取消，由按钮保存
+        # self.save_api_config()
+
+        # 创建输出文件夹
+        os.makedirs(output_path, exist_ok=True)
+
+        # 获取所有音频文件
+        audio_files = []
+        for root, _, files in os.walk(audio_path):
+            for file in files:
+                if file.lower().endswith(('.mp3', '.wav')):
+                    audio_files.append(os.path.join(root, file))
+
+        if not audio_files:
+            messagebox.showerror("错误", "未找到音频文件")
+            return
+
+        # 更新进度条配置
+        self.progress_bar['maximum'] = len(audio_files)
+        self.progress_bar['value'] = 0
+
+        def process_files():
+            try:
+                total_files = len(audio_files)
+                success_count = 0
+
+                for i, audio_file in enumerate(audio_files, 1):
+                    try:
+                        output_file = os.path.join(
+                            output_path,
+                            os.path.splitext(os.path.basename(audio_file))[0] + '.srt'
+                        )
+
+                        self.update_progress_text(f"处理文件 ({i}/{total_files}): {os.path.basename(audio_file)}")
+
+                        # 生成字幕
+                        self.generator.generate_srt(
+                            audio_path=audio_file,
+                            output_path=output_file
+                        )
+
+                        success_count += 1
+                        self.update_progress_bar(i, total_files)
+                        self.update_progress_text(f"成功生成字幕: {os.path.basename(output_file)}")
+
+                    except Exception as e:
+                        self.update_progress_text(f"处理文件失败: {os.path.basename(audio_file)} - 错误: {str(e)}")
+                        logging.error(f"处理文件 {audio_file} 失败: {str(e)}")
+                        continue
+
+                self.update_progress_text(
+                    f"处理完成: 成功 {success_count}/{total_files} 个文件, "
+                    f"失败 {total_files - success_count} 个文件"
+                )
+                messagebox.showinfo("完成", "字幕生成任务已完成")
+
+            except Exception as e:
+                self.update_progress_text(f"处理过程中发生错误: {str(e)}")
+                logging.error(f"生成字幕过程中发生错误: {str(e)}")
+                messagebox.showerror("错误", "字幕生成失败，请查看日志")
+            finally:
+                self.is_generating = False
+                self.generate_btn.config(state='normal')
+
+        threading.Thread(target=process_files, daemon=True).start()
+
+    def validate_api_config(self):
+        """验证API配置是否有效"""
+        # 使用原始值进行验证
+        app_id = self.original_app_id
+        app_key = self.original_app_key
+
+        # 检查原始值是否为空
+        if not app_id or not app_key:
+            logging.error("API配置验证失败: APP ID 或 API Key 为空")
+            messagebox.showerror("错误", "APP ID 和 API Key 不能为空")
+            self.update_progress_text("API配置验证失败: APP ID 和 API Key 不能为空")
+            return False
+
+        try:
+            # 打印用于验证的原始值，方便调试
+            logging.info(f"开始验证API配置 - app_id: {repr(app_id)}, app_key: {repr(app_key)}")
+            print(f"验证时使用的 app_id: {repr(app_id)}")
+            print(f"验证时使用的 app_key: {repr(app_key)}")
+
+            # 设置API配置到generator
+            self.generator.set_api_config(app_id, app_key)
+
+            # 进行测试翻译
+            test_text = "Hello"
+            logging.info(f"执行测试翻译，测试文本: {test_text}")
+            result = self.generator.test_translation(test_text)
+
+            if result:
+                logging.info("API配置验证成功")
+                self.update_progress_text("API配置验证成功")
+                return True
+            else:
+                logging.error("API配置验证失败: 测试翻译返回空结果")
+                messagebox.showerror("错误", "API配置无效，请检查APP ID和API Key")
+                self.update_progress_text("API配置验证失败: 测试翻译返回空结果")
+                return False
+
+        except Exception as e:
+            # 捕获并记录详细的错误信息
+            error_msg = f"API配置验证失败: {str(e)}"
+            logging.error(error_msg)
+            print(error_msg)
+            messagebox.showerror("错误", error_msg)
+            self.update_progress_text(error_msg)
+            return False
+
+    # 如果用户手动修改了输入框，需要更新原始值
+    def update_api_config(self):
+        """更新API配置，当用户修改输入框内容时"""
+        display_app_id = self.app_id_entry.get().strip()
+        display_app_key = self.app_key_entry.get().strip()
+
+        # 检查输入框中的值是否是隐藏格式（包含***）
+        def is_masked(text):
+            return '***' in text
+
+        # 如果两个输入框都是隐藏格式，保持原始值不变
+        if is_masked(display_app_id) and is_masked(display_app_key):
+            logging.info("API配置未更改（输入框值为隐藏格式，保持原始值）")
+            self.update_progress_text("API配置未更改（使用原始值）")
+            return
+
+        # 检查并更新 APP ID
+        if not is_masked(display_app_id):
+            self.original_app_id = display_app_id
+            logging.info(f"更新 APP ID: {repr(self.original_app_id)}")
+
+        # 检查并更新 API Key
+        if not is_masked(display_app_key):
+            self.original_app_key = display_app_key
+            logging.info(f"更新 API Key: {repr(self.original_app_key)}")
+
+        self.update_progress_text("API配置已更新")
+        logging.info(f"当前原始值 - app_id: {repr(self.original_app_id)}, app_key: {repr(self.original_app_key)}")
+
+    def test_translation(self, text):
+        """测试翻译API配置是否有效"""
+        try:
+            # 生成签名
+            salt = str(random.randint(32768, 65536))
+            sign = self.app_id + text + salt + self.app_key
+            sign = hashlib.md5(sign.encode()).hexdigest()
+
+            # 构建请求
+            headers = {'Content-Type': 'application/x-www-form-urlencoded'}
+            payload = {
+                'q': text,
+                'from': 'en',
+                'to': 'zh',
+                'appid': self.app_id,
+                'salt': salt,
+                'sign': sign
+            }
+
+            # 发送请求
+            response = requests.post(self.api_url, headers=headers, data=payload)
+            result = response.json()
+
+            # 检查响应
+            if 'trans_result' in result:
+                return True
+            else:
+                return False
+
+        except Exception as e:
+            logging.error(f"测试翻译API失败: {e}")
+            return False
+
+    def stop_generate(self):
+        """停止生成字幕"""
+        self.is_generating = False
+        self.generate_btn.config(state='normal')
+        self.stop_btn.config(state='disabled')
+        self.update_progress_text("已停止生成字幕")
+
+
 class WhisperFollowReading:
     def __init__(self, model_size="tiny"):
         self.model_size = model_size
@@ -1857,7 +2630,7 @@ class AudioPlayer:
         )
 
         style.configure('TFrame', background=main_bg)
-        self.follow_button = ttk.Button(self.root, text="跟读", command=self.toggle_follow_reading)
+        self.follow_button = ttk.Button(self.root, text="跟读", command=self.toggle_follow_mode)
         self.follow_button.pack(pady=5)
 
         self.load_button = ttk.Button(self.root, text="加载音频和字幕", command=self.load_files)
@@ -1986,6 +2759,7 @@ class AudioPlayer:
 
     def continue_after_playback(self):
         """回放结束后继续播放"""
+
         try:
             # 先检查当前段落
             self.current_segment += 1
@@ -2115,6 +2889,7 @@ class AudioPlayer:
             self.update_progress()
 
         except Exception as e:
+            logging.error(f"恢复普通播放失败: {e}")
             logging.error(f"恢复普通播放失败: {e}")
 
     def calculate_improved_similarity(self, text1, text2):
@@ -2273,6 +3048,60 @@ class AudioPlayer:
                 json.dump(list(self.favorites), f, ensure_ascii=False, indent=2)
         except Exception as e:
             logging.error(f"保存收藏失败: {e}")
+
+    # 暂时未使用
+    def update_wave_display(self):
+        """改进的波形显示更新功能"""
+        try:
+            if not self.is_playing or not self.current_playlist:
+                return
+
+            current_file = self.current_playlist[self.current_index]
+
+            # 检查缓存
+            if current_file not in self._audio_cache:
+                # 读取音频数据
+                with wave.open(current_file, 'rb') as wf:
+                    signal = wf.readframes(-1)
+                    signal = np.frombuffer(signal, dtype=np.int16)
+
+                    # 计算波形数据
+                    chunks = np.array_split(signal, self.wave_canvas.winfo_width())
+                    peaks = [abs(chunk).max() for chunk in chunks]
+
+                    # 缓存波形数据
+                    self._audio_cache[current_file] = peaks
+
+            # 绘制波形
+            self.wave_canvas.delete('all')
+            peaks = self._audio_cache[current_file]
+
+            # 获取当前播放位置
+            position = pygame.mixer.music.get_pos() / 1000.0
+            total_length = self.get_current_audio_length()
+            position_ratio = position / total_length
+
+            # 绘制波形和播放位置指示器
+            height = self.wave_canvas.winfo_height()
+            for i, peak in enumerate(peaks):
+                x = i
+                y = height // 2
+                amplitude = (peak / 32768.0) * (height // 2)
+
+                # 区分已播放和未播放部分
+                if i < len(peaks) * position_ratio:
+                    color = '#4CAF50'  # 已播放部分为绿色
+                else:
+                    color = '#9E9E9E'  # 未播放部分为灰色
+
+                self.wave_canvas.create_line(x, y - amplitude, x, y + amplitude, fill=color)
+
+            # 绘制播放位置指示线
+            pos_x = int(len(peaks) * position_ratio)
+            self.wave_canvas.create_line(pos_x, 0, pos_x, height, fill='red', width=2)
+
+        except Exception as e:
+            print(f"更新波形显示失败: {e}")
 
     def update_stats(self):
         """更新播放统计"""
@@ -2619,6 +3448,22 @@ class AudioPlayer:
             logging.info(f"显示字幕: {text}")
             self.follow_text.insert('1.0', text)
 
+            # # 显示时间信息
+            # self.follow_text.insert('end',
+            #                         f"时间: {self.format_time(subtitle['start_time'], is_milliseconds=True)} -> "
+            #                         f"{self.format_time(subtitle['end_time'], is_milliseconds=True)}\n\n",
+            #                         'time')
+            #
+            # # 显示英文
+            # if subtitle.get('en_text'):
+            #     self.follow_text.insert('end', subtitle['en_text'] + '\n', 'en')
+            #
+            # # 显示中文
+            # if subtitle.get('cn_text'):
+            #     self.follow_text.insert('end', subtitle['cn_text'] + '\n', 'cn')
+            #
+            # # 确保显示最新内容
+            # self.follow_text.see('end')
         except Exception as e:
             print(f"显示字幕失败: {e}")
 
@@ -2698,17 +3543,17 @@ class AudioPlayer:
         pygame.mixer.quit()
         pygame.mixer.init(frequency=44100, size=-16, channels=1)
 
-    # def on_button_click(self, action):
-    #     """按钮点击事件"""
-    #     self.reset_audio()  # 重置音频模块
-    #     if action == "play":
-    #         self.play_audio(current_audio_file)
-    #     elif action == "next":
-    #         self.stop_audio()
-    #         self.load_next_audio()
-    #     elif action == "previous":
-    #         self.stop_audio()
-    #         self.load_previous_audio()
+    def on_button_click(self, action):
+        """按钮点击事件"""
+        self.reset_audio()  # 重置音频模块
+        if action == "play":
+            self.play_audio(current_audio_file)
+        elif action == "next":
+            self.stop_audio()
+            self.load_next_audio()
+        elif action == "previous":
+            self.stop_audio()
+            self.load_previous_audio()
 
     def get_current_audio_length(self):
         """获取当前音频文件的总长度"""
@@ -2891,62 +3736,37 @@ class AudioPlayer:
                 if hasattr(self, 'whisper_follow_recording'):
                     self.whisper_follow_recording.cleanup_temp_files()
 
-                # 延迟后继续下一句
-                self.root.after(1000, self._continue_to_next_sentence)  # 增加延迟到1秒
-                self.update_status("准备播放下一句...", 'info')
+                # 延迟后继续下一段
+                self.root.after(1000, self._continue_to_next_segment)  # 增加延迟到1秒
+                self.update_status("准备播放下一段...", 'info')
 
         except Exception as e:
             logging.error(f"处理播放结束事件失败: {e}")
             self.update_status("处理播放结束失败", 'error')
 
-    def _continue_to_next_sentence(self):
-        """继续播放下一句"""
+    def _continue_to_next_segment(self):
+        """继续播放下一段"""
         try:
-            logging.info(f"当前句子: {self.current_sentence_index}, 总句子数: {len(self.sentences)}")
+            logging.info(f"当前段落: {self.current_segment}, 总段落数: {len(self.subtitles)}")
 
-            if self.current_sentence_index >= len(self.sentences) - 1:
+            if self.current_segment >= len(self.subtitles) - 1:
                 self.stop_follow_reading()
                 self.update_status("跟读完成", 'info')
                 return
 
-            self.current_sentence_index += 1
-            logging.info(f"切换到下一句: {self.current_sentence_index}")
+            self.current_segment += 1
+            logging.info(f"切换到下一段: {self.current_segment}")
 
             # 确保资源被清理
             self._cleanup_audio_resources()
             self._cleanup_timers()
 
-            # 播放新句子
-            self.play_current_sentence()
+            # 播放新段落
+            self.play_current_segment()
 
         except Exception as e:
-            logging.error(f"继续播放下一句失败: {e}")
-            self.update_status("继续播放失败", 'error')
-
-    def play_current_sentence(self):
-        """播放当前句子"""
-        try:
-            # 更新状态显示
-            self.update_subtitle()
-            self.update_info_label()
-            self.update_progress()
-
-            # 根据模式选择播放方式
-            if self.follow_mode:
-                self.follow_read_mode()
-            else:
-                # 使用优化的音频播放
-                if self.audio_preprocessing['normalize_audio']:
-                    self.play_processed_audio(self.audio_files[self.current_sentence_index])
-                else:
-                    self.play_original_audio()
-
-            # 保存播放状态
-            self.save_player_state()
-
-        except Exception as e:
-            logging.error(f"播放当前句子失败: {e}")
-            self.show_error(f"播放当前句子失败: {e}")
+            logging.error(f"继续下一段失败: {e}")
+            self.update_status("继续下一段失败", 'error')
 
     def _cleanup_audio_resources(self):
         """改进的音频资源清理"""
@@ -2994,18 +3814,19 @@ class AudioPlayer:
         if not self.is_paused_for_delay:
             self.is_paused_for_delay = True
             self.update_status("播放完毕，等待3秒...", 'info')
-            self._playback_delay_timer = self.root.after(3000, self._play_next_track)
+            self._playback_delay_timer = self.root.after(3000, self._play_next_after_delay)
 
-    def _play_next_track(self):
+    def _play_next_after_delay(self):
         """延迟后播放下一曲"""
         self.is_paused_for_delay = False
-        if self.current_index < len(self.current_playlist) - 1:
-            self.next_track()
-        elif self.mode_var.get() == "loop_all":
-            self.current_index = 0
-            self.play_current_track()
-        else:
-            self.stop()
+        self.current_index += 1
+        if self.current_index >= len(self.current_playlist):
+            if self.mode_var.get() == "loop_all":
+                self.current_index = 0
+            else:
+                self.stop()
+                return
+        self.play_current_track()
 
     def update_subtitle(self):
         """改进的字幕更新功能"""
@@ -4447,35 +5268,43 @@ class AudioPlayer:
             logging.error(f"更新树形选择失败: {e}")
 
     def play_current_track(self):
-        """播放当前曲目"""
         try:
             if not self.current_playlist:
                 self.update_status("没有可播放的文件", 'warning')
                 return
 
+            # 先清理现有资源
+            self._cleanup_audio_resources()
+
+            # 获取当前曲目文件
             current_file = self.current_playlist[self.current_index]
-            pygame.mixer.music.load(current_file)
-            pygame.mixer.music.play()
-            pygame.mixer.music.set_volume(self._volume / 100.0)
 
-            self.is_playing = True
-            self.play_button.config(text="暂停")
-
-            # 加载字幕
+            # 先加载字幕，确保字幕数据可用
             self.load_subtitles(current_file)
+            if not self.subtitles:
+                logging.warning(f"字幕加载失败，文件: {current_file}")
+                self.update_status("无字幕数据，请检查文件", 'warning')
+
+            # 确保字幕组件可见
+            if not self.follow_text.winfo_ismapped():
+                logging.info("普通模式下确保字幕组件可见")
+                self.follow_text.pack()  # 或其他显示方法
+
+            # 加载并播放音频（音量和状态在 _play_audio 中设置）
+            self._play_audio(current_file, 0, update_subtitle=True, update_progress=True)
 
             # 更新显示
             self.update_info_label()
             total_length = self.get_current_audio_length()
-            self.progress_scale.set(0)
             self.time_label.config(text=f"00:00 / {self.format_time(total_length)}")
 
-            # 启动进度更新
-            self.update_progress()
+            # 启动进度更新（如果 _play_audio 未启动）
+            if self.is_playing and not hasattr(self, 'update_timer'):
+                self.update_progress()
 
         except Exception as e:
-            logging.error(f"播放当前曲目失败: {e}")
-            self.show_error(f"播放当前曲目失败: {e}")
+            self.update_status(f"播放失败: {str(e)}", 'error')
+            logging.error(f"播放失败: {str(e)}")
 
     def _start_playback_check(self):
         """延迟启动播放状态检查"""
@@ -4660,11 +5489,11 @@ class AudioPlayer:
 
         # 导航按钮
         ttk.Button(follow_control_frame, text="上一句", width=5,
-                   command=self.previous_sentence).pack(side="left", padx=5)
+                   command=self.previous_segment).pack(side="left", padx=5)
         ttk.Button(follow_control_frame, text="下一句", width=5,
-                   command=self.next_sentence).pack(side="left", padx=5)
+                   command=self.next_segment).pack(side="left", padx=5)
         ttk.Button(follow_control_frame, text="重复本句", width=8,
-                   command=self.repeat_sentence).pack(side="left", padx=5)
+                   command=self.repeat_current_segment).pack(side="left", padx=5)
 
     def toggle_recording_mode(self):
         """切换录音模式，并处理互斥逻辑"""
@@ -4870,7 +5699,7 @@ class AudioPlayer:
                         logging.warning(f"检测到播放过早停止(第{retry_count + 1}次重试)")
                         self._retry_count = retry_count + 1
                         # 使用延迟重试，避免资源冲突
-                        self.root.after(200, self.repeat_sentence)
+                        self.root.after(200, self.repeat_current_segment)
                         return
 
             # 继续检查
@@ -4881,35 +5710,44 @@ class AudioPlayer:
             self._segment_playing = False
             self.is_playing = False
 
-    def previous_sentence(self):
-        """上一句：整合了音频处理、字幕同步和状态管理的优化版本"""
+    def previous_segment(self):
+        """播放上一句"""
         try:
-            self.stop_audio()  # 停止当前播放
-            if self.current_sentence_index > 0:
-                self._cleanup_audio_resources()  # 清理音频资源
-                self.current_sentence_index -= 1
+            # 防止快速切换导致的并发问题
+            if self._segment_switch_lock:
+                self.update_status("正在切换，请稍候...", "warning")
+                return
+            self._segment_switch_lock = True
 
-                # 更新进度和状态
-                self.update_subtitle()
-                self.update_info_label()
-                self.update_progress()
+            # 检查字幕数据是否有效
+            if not self.subtitles:
+                self.update_status("没有字幕数据", 'warning')
+                return
 
-                # 根据模式选择播放方式
-                if self.follow_mode:
-                    self.follow_read_mode()
+            # 更新段落索引
+            if self.current_segment > 0:
+                self.current_segment -= 1
+
+                # 清理现有资源和定时器
+                self._cleanup_audio_resources()
+                self._cleanup_timers()
+
+                # 如果在跟读模式下,停止当前录音
+                if self.is_following and hasattr(self, 'whisper_follow_recording'):
+                    self.whisper_follow_recording.stop_recording()
+                    self.whisper_follow_recording.cleanup_temp_files()
+
+                # 播放新段落
+                self.play_current_segment()
             else:
-                # 使用优化的音频播放
-                if self.audio_preprocessing['normalize_audio']:
-                    self.play_processed_audio(self.audio_files[self.current_sentence_index])
-                else:
-                    self.play_original_audio()
-
-                # 保存播放状态
-            self.save_player_state()
+                # 已到第一句话，保持当前曲目
+                self.update_status("已是第一句话", 'info')
 
         except Exception as e:
-            logging.error(f"切换上一句失败: {e}")
-            self.show_error(f"切换上一句失败: {e}")
+            logging.error(f"播放上一句失败: {e}")
+            self.update_status("播放上一句失败", 'error')
+        finally:
+            self._segment_switch_lock = False
 
     def next_sentence(self):
         """下一句：整合了音频处理、字幕同步和状态管理的优化版本"""
@@ -4927,15 +5765,15 @@ class AudioPlayer:
                 # 根据模式选择播放方式
                 if self.follow_mode:
                     self.follow_read_mode()
-            else:
-                # 使用优化的音频播放
-                if self.audio_preprocessing['normalize_audio']:
-                    self.play_processed_audio(self.audio_files[self.current_sentence_index])
                 else:
-                    self.play_original_audio()
+                    # 使用优化的音频播放
+                    if self.audio_preprocessing['normalize_audio']:
+                        self.play_processed_audio(self.audio_files[self.current_sentence_index])
+                    else:
+                        self.play_original_audio()
 
                 # 保存播放状态
-            self.save_player_state()
+                self.save_player_state()
 
         except Exception as e:
             logging.error(f"切换下一句失败: {e}")
@@ -5006,7 +5844,7 @@ class AudioPlayer:
             logging.error(f"播放当前段落失败: {e}")
             self.update_status("播放当前段落失败", 'error')
 
-    def repeat_sentence(self):
+    def repeat_current_segment(self):
         """重复当前句功能(支持普通模式和跟读模式)"""
         try:
             # 防止快速切换导致的并发问题
@@ -5250,6 +6088,7 @@ class AudioPlayer:
             logging.error(f"播放/暂停操作失败: {e}")
             self.update_status("播放/暂停操作失败", 'error')
 
+    # =================== Follow Reading Methods from ver0017_5 and ver0017_6 ===================
     def load_sentences_and_audio(self, sentences, audio_files):
         """加载字幕和音频"""
         self.sentences = sentences
@@ -5283,7 +6122,6 @@ class AudioPlayer:
                 while pygame.mixer.music.get_busy():
                     pygame.time.Clock().tick(10)
             logging.info(f"播放音频: {filename}")
-
         except Exception as e:
             logging.error(f"播放失败: {e}")
             self.show_error(f"播放失败: {e}")
@@ -5329,7 +6167,6 @@ class AudioPlayer:
                     wavio.write(filename, recording, sample_rate, sampwidth=2)
                     self.current_recording = filename
                     logging.info(f"录音已保存为 {filename}")
-
                 except Exception as e:
                     logging.error(f"录音过程出错: {e}")
                 finally:
@@ -5436,46 +6273,1928 @@ class AudioPlayer:
                 logging.error(f"识别失败: {e}")
                 return "识别失败"
 
-def main():
-    """主程序入口"""
-    # 设置中文字体支持
-    if os.name == 'nt':  # Windows系统
-        import ctypes
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    def update_recognition_text(self, filename):
+        """更新识别结果"""
+        text = self.recognize_audio(filename)
+        self.recognition_label.config(text=f"识别结果: {text}")
 
-    root = tk.Tk()
-    root.title("英语口语练习助手")
+    def play_original_audio(self):
+        """播放原音频"""
+        self.stop_audio()
+        if 0 <= self.current_sentence_index < len(self.audio_files):
+            self.play_audio(self.audio_files[self.current_sentence_index], wait=True)
+            self.update_subtitle()
 
-    # 设置窗口图标
-    try:
-        # 尝试加载图标文件
-        icon_path = os.path.join(os.path.dirname(__file__), 'assets', 'icon.ico')
-        if os.path.exists(icon_path):
-            root.iconbitmap(icon_path)
+    def play_recording(self, filename):
+        """播放录音"""
+        if os.path.exists(filename):
+            if not self.no_play_recording.get():
+                self.play_audio(filename, wait=True)
+                if not pygame.mixer.music.get_busy():
+                    self.play_audio_with_pydub(filename, wait=True)
+        else:
+            logging.error(f"录音文件 {filename} 不存在")
+            self.show_error(f"录音文件 {filename} 不存在")
+
+    def toggle_follow_mode(self):
+        """切换跟读模式"""
+        self.follow_mode = not self.follow_mode
+        if self.follow_mode:
+            self.follow_button.config(text="取消跟读")
+            logging.info("进入跟读模式")
+            self.follow_read_mode()
+        else:
+            self.follow_button.config(text="跟读")
+            logging.info("退出跟读模式")
+            self.play_original_audio()
+
+    def follow_read_mode(self):
+        """优化的跟读模式，包含音频预处理和识别功能"""
+        try:
+            # 先播放原音频
+            self.play_original_audio()
+
+            if not self.no_recording_mode.get():
+                # 准备录音文件名
+                timestamp = int(time.time())
+                record_filename = os.path.join(self.recordings_dir, f"follow_reading_{timestamp}.wav")
+
+                # 开始录音
+                if self.record_audio(record_filename, duration=self.recording_duration):
+                    # 等待录音完成
+                    while self.is_recording:
+                        time.sleep(0.1)
+
+                    if self.current_recording:
+                        self.recordings[self.current_sentence_index] = self.current_recording
+
+                        # 播放录音（如果未禁用）
+                        if not self.no_play_recording.get():
+                            self.play_processed_audio(self.current_recording)
+
+                        # 识别录音并显示结果
+                        self.update_recognition_text(self.current_recording)
+
+                        # 计算相似度并给出反馈
+                        if hasattr(self, 'sentences') and self.sentences:
+                            reference_text = self.sentences[self.current_sentence_index]
+                            recognition_text = self.recognize_audio(self.current_recording)
+                            similarity = self.calculate_improved_similarity(reference_text, recognition_text)
+                            feedback = self.get_feedback(similarity)
+
+                            # 显示反馈结果
+                            self.show_feedback(feedback, similarity)
+        except Exception as e:
+            logging.error(f"跟读模式执行失败: {e}")
+            self.show_error(f"跟读模式执行失败: {e}")
+
+    def show_feedback(self, feedback, similarity):
+        """显示跟读反馈结果"""
+        try:
+            feedback_text = f"相似度: {similarity:.2%}\n{feedback}"
+            if hasattr(self, 'feedback_label'):
+                self.feedback_label.config(text=feedback_text)
+            else:
+                self.feedback_label = tk.Label(self.root, text=feedback_text, font=("Arial", 10))
+                self.feedback_label.pack(pady=5)
+        except Exception as e:
+            logging.error(f"显示反馈结果失败: {e}")
+
+    def calculate_improved_similarity(self, text1, text2):
+        """计算改进的文本相似度"""
+        try:
+            def preprocess(text):
+                # 转小写，去除标点和多余空格
+                text = text.lower()
+                text = re.sub(r'[^\w\s]', '', text)
+                text = ' '.join(text.split())
+                return text
+
+            # 预处理文本
+            text1 = preprocess(text1)
+            text2 = preprocess(text2)
+
+            # 分词
+            words1 = set(text1.split())
+            words2 = set(text2.split())
+
+            # 计算相似度
+            intersection = len(words1.intersection(words2))
+            union = len(words1.union(words2))
+
+            return intersection / union if union > 0 else 0
+        except Exception as e:
+            logging.error(f"计算相似度失败: {e}")
+            return 0
+
+    def get_feedback(self, similarity):
+        """根据相似度生成反馈信息"""
+        if similarity >= 0.9:
+            return "太棒了！发音非常准确！"
+        elif similarity >= 0.7:
+            return "不错！继续保持！"
+        elif similarity >= 0.5:
+            return "还可以，请继续练习。"
+        else:
+            return "需要更多练习，请继续努力！"
+
+    def next_sentence(self):
+        """下一句：整合了音频处理、字幕同步和状态管理的优化版本"""
+        try:
+            self.stop_audio()  # 停止当前播放
+            if self.current_sentence_index < len(self.sentences) - 1:
+                self._cleanup_audio_resources()  # 清理音频资源
+                self.current_sentence_index += 1
+
+                # 更新进度和状态
+                self.update_subtitle()
+                self.update_info_label()
+                self.update_progress()
+
+                # 根据模式选择播放方式
+                if self.follow_mode:
+                    self.follow_read_mode()
+                else:
+                    # 使用优化的音频播放
+                    if self.audio_preprocessing['normalize_audio']:
+                        self.play_processed_audio(self.audio_files[self.current_sentence_index])
+                    else:
+                        self.play_original_audio()
+
+                # 保存播放状态
+                self.save_player_state()
+
+        except Exception as e:
+            logging.error(f"切换下一句失败: {e}")
+            self.show_error(f"切换下一句失败: {e}")
+
+    def prev_sentence(self):
+        """上一句：整合了音频处理、字幕同步和状态管理的优化版本"""
+        try:
+            self.stop_audio()  # 停止当前播放
+            if self.current_sentence_index > 0:
+                self._cleanup_audio_resources()  # 清理音频资源
+                self.current_sentence_index -= 1
+
+                # 更新进度和状态
+                self.update_subtitle()
+                self.update_info_label()
+                self.update_progress()
+
+                # 根据模式选择播放方式
+                if self.follow_mode:
+                    self.follow_read_mode()
+                else:
+                    # 使用优化的音频播放
+                    if self.audio_preprocessing['normalize_audio']:
+                        self.play_processed_audio(self.audio_files[self.current_sentence_index])
+                    else:
+                        self.play_original_audio()
+
+                # 保存播放状态
+                self.save_player_state()
+
+        except Exception as e:
+            logging.error(f"切换上一句失败: {e}")
+            self.show_error(f"切换上一句失败: {e}")
+
+    def repeat_sentence(self):
+        """重复当前句：整合了音频处理和状态管理的优化版本"""
+        try:
+            self.stop_audio()  # 停止当前播放
+            self._cleanup_audio_resources()  # 清理音频资源
+
+            # 更新状态显示
+            self.update_subtitle()
+            self.update_info_label()
+
+            # 根据模式选择播放方式
+            if self.follow_mode:
+                self.follow_read_mode()
+            else:
+                # 使用优化的音频播放
+                if self.audio_preprocessing['normalize_audio']:
+                    self.play_processed_audio(self.audio_files[self.current_sentence_index])
+                else:
+                    self.play_original_audio()
+
+            # 保存播放状态
+            self.save_player_state()
+
+        except Exception as e:
+            logging.error(f"重复播放失败: {e}")
+            self.show_error(f"重复播放失败: {e}")
+
+    def _cleanup_audio_resources(self):
+        """清理音频资源，避免内存泄漏和音频冲突"""
+        try:
+            # 停止所有播放
+            self.stop_audio()
+
+            # 清理录音资源
+            if self.is_recording:
+                self.stop_recording()
+
+            # 清理临时文件
+            for file in os.listdir(self.temp_dir):
+                try:
+                    os.remove(os.path.join(self.temp_dir, file))
+                except:
+                    pass
+
+            # 重置音频引擎
+            self.reset_audio()
+
+        except Exception as e:
+            logging.error(f"清理音频资源失败: {e}")
+
+    def show_about(self):
+        """显示关于信息"""
+        try:
+            about_window = tk.Toplevel(self.root)
+            about_window.title("关于")
+            about_window.geometry("300x200")
+
+            about_label = ttk.Label(about_window,
+                                    text="""英语语感听说助手\n版本: 1.0\n作者: 林溪木\n日期: 2025-02-01""",
+                                    padding=10)
+            about_label.pack(expand=True, fill=tk.BOTH)
+
+        except Exception as e:
+            self.update_status(f"显示关于信息失败: {str(e)}", 'error')
+
+    def export_playlist(self):
+        """导出播放列表"""
+        try:
+            if not self.current_playlist:
+                self.update_status("当前没有播放列表", 'warning')
+                return
+
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".m3u",
+                filetypes=[("M3U Playlist", "*.m3u"), ("All files", "*.*")]
+            )
+
+            if file_path:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write("#EXTM3U\n")  # M3U 文件头
+                    for file in self.current_playlist:
+                        f.write(file + '\n')
+
+                self.update_status("播放列表导出成功", 'success')
+
+        except Exception as e:
+            self.update_status(f"导出播放列表失败: {str(e)}", 'error')
+
+    def import_playlist(self):
+        """导入播放列表"""
+        try:
+            file_path = filedialog.askopenfilename(
+                defaultextension=".m3u",
+                filetypes=[("M3U Playlist", "*.m3u"), ("All files", "*.*")]
+            )
+
+            if file_path:
+                files = []
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith('#'):
+                            if os.path.exists(line):  # 检查文件是否存在
+                                files.append(line)
+                            else:
+                                logging.warning(f"播放列表中的文件不存在: {line}")
+
+                # 过滤掉不存在的文件
+                files = [f for f in files if os.path.exists(f)]
+
+                # 只有当成功导入至少一个文件时才更新播放列表
+                if files:
+                    self.current_playlist = files
+                    self.current_index = 0
+                    self.play_current_track()
+                    self.update_status("播放列表导入成功", 'success')
+
+        except Exception as e:
+            self.update_status(f"导入播放列表失败: {str(e)}", 'error')
+
+    def toggle_favorite(self):
+        """切换收藏状态"""
+        try:
+            if not self.current_playlist or self.current_index >= len(self.current_playlist):
+                self.update_status("没有可收藏的音频", 'warning')
+                return
+
+            current_file = self.current_playlist[self.current_index]
+
+            if current_file in self.favorites:
+                self.favorites.remove(current_file)
+                self.update_status("已取消收藏", 'info')
+            else:
+                self.favorites.add(current_file)
+                self.update_status("已添加到收藏", 'success')
+
+            # 保存收藏列表
+            self.save_favorites()
+
+        except Exception as e:
+            self.update_status(f"收藏操作失败: {str(e)}", 'error')
+
+    def save_favorites(self):
+        """保存收藏列表"""
+        try:
+            favorites_file = os.path.join(self.config_dir, 'favorites.json')
+            with open(favorites_file, 'w', encoding='utf-8') as f:
+                json.dump(list(self.favorites), f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logging.error(f"保存收藏失败: {e}")
+
+    def show_stats(self):
+        """改进的统计信息显示功能"""
+        try:
+            stats_window = tk.Toplevel(self.root)
+            stats_window.title("播放统计")
+            stats_window.geometry("400x500")
+
+            # 计算会话时长
+            session_duration = time.time() - self.stats['session_start']
+            total_hours = self.stats['total_play_time'] / 3600
+
+            # 创建统计信息文本
+            stats_text = tk.Text(stats_window, wrap=tk.WORD, padx=10, pady=10)
+            stats_text.pack(fill=tk.BOTH, expand=True)
+
+            stats_info = [
+                ("播放统计", "-" * 40),
+                ("总播放时长", f"{total_hours:.2f}小时"),
+                ("本次会话时长", f"{session_duration / 3600:.2f}小时"),
+                ("播放文件数", len(self.stats['played_files'])),
+                ("收藏文件数", len(self.favorites)),
+                ("文件夹数量", len(self.folders)),
+                ("", "-" * 40),
+                ("最近播放", "最后播放时间" if self.stats['last_played'] else "无"),
+                ("", time.strftime("%Y-%m-%d %H:%M:%S",
+                                   time.localtime(self.stats['last_played'])) if self.stats['last_played'] else "")
+            ]
+
+            for title, value in stats_info:
+                stats_text.insert(tk.END, f"{title}: {value}\n")
+
+            stats_text.config(state=tk.DISABLED)
+
+        except Exception as e:
+            self.update_status(f"显示统计信息失败: {str(e)}", 'error')
+
+    def check_follow_status(self, original_wait_time):
+        """检查跟读状态"""
+        if not self.is_following:
+            return
+
+        current_time = time.time()
+        if (current_time - self.follow_reader.last_audio_time >= self.follow_reader.silence_threshold or
+                current_time - self.follow_reader.last_audio_time >= original_wait_time / 1000):
+
+            # 如果没有检测到语音输入且已经过了最短等待时间
+            if not self.follow_reader.frames and current_time - self.follow_reader.last_audio_time >= self.follow_reader.min_wait_time:
+                self.follow_text.insert('end', "\n未检测到语音输入，继续下一段\n", 'warning')
+                self.continue_after_playback()
+                return
+
+            # 处理录音
+            self.process_follow_reading()
+        else:
+            # 继续等待
+            self.root.after(100, lambda: self.check_follow_status(original_wait_time))
+
+    def show_shortcuts(self):
+        """显示快捷键列表"""
+        try:
+            shortcuts_window = tk.Toplevel(self.root)
+            shortcuts_window.title("快捷键")
+            shortcuts_window.geometry("300x400")
+
+            shortcuts_text = tk.Text(shortcuts_window, wrap=tk.WORD, padx=10, pady=10)
+            shortcuts_text.pack(fill=tk.BOTH, expand=True)
+
+            shortcuts_info = [
+                ("播放/暂停", "Space 或 Ctrl+P"),
+                ("停止", "Esc"),
+                ("上一曲", "无"),
+                ("下一曲", "无"),
+                ("快退", "Left"),
+                ("快进", "Right"),
+                ("长距离快退", "Ctrl+Left"),
+                ("长距离快进", "Ctrl+Right"),
+                ("音量增大", "Up"),
+                ("音量减小", "Down"),
+                ("语速加快", "Ctrl+Up"),
+                ("语速减慢", "Ctrl+Down"),
+                ("跟读模式", "Ctrl+F"),
+                ("保存状态", "Ctrl+S")
+            ]
+
+            for action, keys in shortcuts_info:
+                shortcuts_text.insert(tk.END, f"{action}: {keys}\n")
+
+            shortcuts_text.config(state=tk.DISABLED)
+
+        except Exception as e:
+            self.update_status(f"显示快捷键帮助失败: {str(e)}", 'error')
+
+    def cleanup_and_continue(self, playback_file, transcribe_file):
+        """修复的文件清理功能"""
+        try:
+            # 先停止播放避免文件占用
+            pygame.mixer.music.stop()
+            pygame.mixer.music.unload()
+
+            # 等待一小段时间确保文件释放
+            time.sleep(0.1)
+
+            # 确保文件存在再删除
+            if playback_file and os.path.exists(playback_file):
+                try:
+                    os.remove(playback_file)
+                except Exception as e:
+                    logging.warning(f"清理播放文件失败: {e}")
+
+            if transcribe_file and os.path.exists(transcribe_file):
+                try:
+                    os.remove(transcribe_file)
+                except Exception as e:
+                    logging.warning(f"清理转写文件失败: {e}")
+
+        except Exception as e:
+            logging.error(f"清理临时文件失败: {e}")
+        finally:
+            # 无论清理是否成功都继续下一步
+            self.continue_after_playback()
+
+    def continue_after_playback(self):
+        """回放结束后继续播放"""
+
+        try:
+            # 先检查当前段落
+            self.current_segment += 1
+            if self.current_segment < self.total_segments:
+                # 当前音频还有下一段，继续播放
+                self.follow_text.insert('end', "\n=== 准备下一段 ===\n", 'prompt')
+                self.play_segment()
+                return
+
+            # 当前音频的所有段落已播放完，检查循环次数
+            self.current_loop += 1
+            if self.current_loop < self.max_follow_loops:
+                # 当前音频还需要再循环
+                self.current_segment = 0
+                self.follow_text.insert('end', f"\n开始第 {self.current_loop + 1} 轮跟读\n", 'title')
+                self.play_segment()
+                return
+
+            # 当前音频已完成所有循环，检查播放模式
+            play_mode = self.mode_var.get()
+
+            if play_mode == "loop_one":
+                # 单曲循环模式：重置循环次数和段落，继续播放
+                self.current_loop = 0
+                self.current_segment = 0
+                self.follow_text.insert('end', "\n重新开始跟读当前音频\n", 'title')
+                self.play_segment()
+
+            elif self.current_index < len(self.current_playlist) - 1:
+                # 还有下一个音频文件要播放
+                self.current_index += 1
+                self.current_loop = 0
+                self.current_segment = 0
+                self.follow_text.insert('end', f"\n开始跟读下一个音频文件\n", 'title')
+                self.start_follow_reading()
+
+            elif play_mode == "loop_all":
+                # 列表循环模式：回到第一个文件
+                self.current_index = 0
+                self.current_loop = 0
+                self.current_segment = 0
+                self.follow_text.insert('end', "\n重新开始跟读播放列表\n", 'title')
+                self.start_follow_reading()
+
+            else:
+                # 顺序播放且已到最后一个文件：停止跟读
+                self.stop_follow_reading()
+
+        except Exception as e:
+            logging.error(f"继续播放失败: {e}")
+            self.update_status("继续播放失败", 'error')
+
+    def stop_follow_reading(self):
+        """改进的停止跟读功能"""
+        if not self.is_following:  # 避免重复调用
+            return
+
+        try:
+            self.is_following = False
+            self.follow_button.config(text="开始跟读")
+
+            # 清理音频资源前先停止所有播放
+            self._cleanup_audio_resources()
+
+            # 重置状态
+            self.is_playing = False
+            self._retry_count = 0
+            self.current_segment = 0
+            self.current_position = 0
+
+            self.follow_text.insert('end', "跟读已停止\n")
+            self.follow_text.see('end')
+
+            # 延迟后再启动普通播放
+            self.root.after(500, self._resume_normal_playback)
+
+            self.update_status("跟读已停止", 'info')
+
+        except Exception as e:
+            logging.error(f"停止跟读失败: {e}")
+            self.update_status("停止跟读失败", 'error')
+
+    def _resume_normal_playback(self):
+        """改进的恢复普通播放功能"""
+        try:
+            if not self.current_playlist:
+                self.update_status("没有可播放的文件", 'warning')
+                return
+
+            # 完全清理资源
+            self._cleanup_audio_resources()
+
+            # 重置播放状态
+            self.current_position = 0
+            self._start_time = 0
+
+            # 重新加载并播放
+            current_file = self.current_playlist[self.current_index]
+            pygame.mixer.music.load(current_file)
+            self.root.after(50, lambda: pygame.mixer.music.play())  # 延迟播放避免加载未完成
+
+            # 设置音量
+            pygame.mixer.music.set_volume(self._volume / 100.0)
+
+            # 开始播放
+            self.is_playing = True
+            self.play_button.config(text="暂停")
+
+            # 加载字幕
+            self.load_subtitles(current_file)
+
+            # 立即更新字幕
+            if self.subtitles:
+                subtitle = self._find_subtitle_optimized(0)
+                if subtitle:
+                    self.follow_text.delete('1.0', 'end')
+                    self.show_current_subtitle(subtitle)
+                    self._update_tree_selection()
+
+                # 更新显示
+                self.update_info_label()
+            total_length = self.get_current_audio_length()
+            self.progress_scale.set(0)
+            self.time_label.config(text=f"00:00 / {self.format_time(total_length)}")
+
+            # 启动进度更新
+            self.update_progress()
+
     except Exception as e:
-        print(f"加载图标失败: {e}")
+    logging.error(f"恢复普通播放失败: {e}")
+    logging.error(f"恢复普通播放失败: {e}")
 
-    # 设置窗口大小和位置
-    window_width = 1000
-    window_height = 800
-    screen_width = root.winfo_screenwidth()
-    screen_height = root.winfo_screenheight()
-    x = (screen_width - window_width) // 2
-    y = (screen_height - window_height) // 2
-    root.geometry(f"{window_width}x{window_height}+{x}+{y}")
 
-    # 设置窗口最小尺寸
-    root.minsize(800, 600)
-
-    # 创建播放器实例并启动
+def calculate_improved_similarity(self, text1, text2):
+    """改进的文本相似度计算"""
     try:
-        player = AudioPlayer(root)
-        player.start()
+        # 文本预处理
+        def preprocess(text):
+            # 转小写，去除标点
+            text = re.sub(r'[^\w\s]', '', text.lower())
+            # 分词
+            return text.split()
+
+        words1 = preprocess(text1)
+        words2 = preprocess(text2)
+
+        if not words1 or not words2:
+            return 0
+
+        # 计算词级别匹配
+        matches = 0
+        total_words = len(words1)
+
+        for w1 in words1:
+            if w1 in words2:
+                matches += 1
+
+        # 考虑词序
+        order_bonus = 0
+        for i in range(len(words1) - 1):
+            if i < len(words2) - 1:
+                if words1[i] == words2[i] and words1[i + 1] == words2[i + 1]:
+                    order_bonus += 0.5
+
+        # 计算最终得分
+        base_score = (matches / total_words) * 100
+        final_score = min(100, base_score + order_bonus)
+
+        return final_score
+
     except Exception as e:
+        logging.error(f"计算相似度失败: {e}")
+        return 0
+
+
+def get_feedback(self, similarity):
+    """根据相似度生成更详细的反馈"""
+    if (similarity >= 90):
+        return "★★★★★ 太棒了！发音非常准确！"
+    elif (similarity >= 80):
+        return "★★★★☆ 非常好！继续保持！"
+    elif (similarity >= 70):
+        return "★★★☆☆ 不错！还可以更好！"
+    elif (similarity >= 60):
+        return "★★☆☆☆ 基本正确，需要多练习"
+    elif (similarity >= 50):
+        return "★☆☆☆☆ 继续努力，重点注意发音"
+        else:
+        return "☆☆☆☆☆ 加油，建议多听多练"
+
+
+def show_about(self):
+    """显示关于信息"""
+    try:
+        about_window = tk.Toplevel(self.root)
+        about_window.title("关于")
+        about_window.geometry("300x200")
+
+        about_label = ttk.Label(about_window,
+                                text="""英语语感听说助手\n版本: 1.0\n作者: 林溪木\n日期: 2025-02-01""",
+                                padding=10)
+        about_label.pack(expand=True, fill=tk.BOTH)
+
+    except Exception as e:
+        self.update_status(f"显示关于信息失败: {str(e)}", 'error')
+
+
+def export_playlist(self):
+    """导出播放列表"""
+    try:
+        if not self.current_playlist:
+            self.update_status("当前没有播放列表", 'warning')
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".m3u",
+            filetypes=[("M3U Playlist", "*.m3u"), ("All files", "*.*")]
+        )
+
+        if file_path:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write("#EXTM3U\n")  # M3U 文件头
+                for file in self.current_playlist:
+                    f.write(file + '\n')
+
+            self.update_status("播放列表导出成功", 'success')
+
+    except Exception as e:
+        self.update_status(f"导出播放列表失败: {str(e)}", 'error')
+
+
+def import_playlist(self):
+    """导入播放列表"""
+    try:
+        file_path = filedialog.askopenfilename(
+            defaultextension=".m3u",
+            filetypes=[("M3U Playlist", "*.m3u"), ("All files", "*.*")]
+        )
+
+        if file_path:
+            files = []
+            with open(file_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        if os.path.exists(line):  # 检查文件是否存在
+                            files.append(line)
+                else:
+                    logging.warning(f"播放列表中的文件不存在: {line}")
+
+            # 过滤掉不存在的文件
+            files = [f for f in files if os.path.exists(f)]
+
+            # 只有当成功导入至少一个文件时才更新播放列表
+            if files:
+                self.current_playlist = files
+                self.current_index = 0
+                self.play_current_track()
+                self.update_status("播放列表导入成功", 'success')
+
+    except Exception as e:
+        self.update_status(f"导入播放列表失败: {str(e)}", 'error')
+
+
+def toggle_favorite(self):
+    """切换收藏状态"""
+    try:
+        if not self.current_playlist or self.current_index >= len(self.current_playlist):
+            self.update_status("没有可收藏的音频", 'warning')
+            return
+
+        current_file = self.current_playlist[self.current_index]
+
+        if current_file in self.favorites:
+            self.favorites.remove(current_file)
+            self.update_status("已取消收藏", 'info')
+        else:
+            self.favorites.add(current_file)
+            self.update_status("已添加到收藏", 'success')
+
+        # 保存收藏列表
+        self.save_favorites()
+
+    except Exception as e:
+        self.update_status(f"收藏操作失败: {str(e)}", 'error')
+
+
+def save_favorites(self):
+    """保存收藏列表"""
+    try:
+        favorites_file = os.path.join(self.config_dir, 'favorites.json')
+        with open(favorites_file, 'w', encoding='utf-8') as f:
+            json.dump(list(self.favorites), f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.error(f"保存收藏失败: {e}")
+
+
+def show_subtitle_generator(self):
+    """显示字幕生成窗口"""
+    SubtitleGeneratorWindow(self.root)
+
+
+def create_widgets(self):
+    """创建界面组件"""
+    style = ttk.Style()
+
+    # 主背景色使用温暖的浅米色
+    main_bg = '#FFF5E6'  # 浅米色背景
+    secondary_bg = '#FFF8F0'  # 次要背景色
+    text_color = '#2C3E50'  # 深蓝灰色文字
+    accent_color = '#E67E22'  # 温暖的橙色作为强调色
+
+    # 配置ttk主题
+    style.theme_use('clam')  # 使用clam主题,这样可以自定义颜色
+
+    # 基础样式配置
+    style.configure('TFrame', background=main_bg)
+    style.configure('TLabelframe', background=main_bg)
+    style.configure('TLabelframe.Label',
+                    background=main_bg,
+                    foreground=text_color,
+                    font=('Microsoft YaHei UI', 10))
+
+    # 在create_widgets函数中,修改按钮颜色和语速控制布局
+
+    # 修改按钮颜色为更淡的橙红色
+    accent_color = '#FF9966'  # 更淡的橙红色
+    hover_color = '#FFB088'  # 鼠标悬停时的颜色
+    pressed_color = '#FF7744'  # 按下时的颜色
+
+    # 按钮样式配置
+    style.configure('TButton',
+                    font=('Microsoft YaHei UI', 9),
+                    background=accent_color,
+                    foreground=text_color,
+                    borderwidth=1,
+                    padding=5)
+
+    style.map('TButton',
+              background=[('active', hover_color),
+                          ('pressed', pressed_color)],
+              foreground=[('active', text_color),
+                          ('pressed', '#FFFFFF')])
+
+    # 菜单样式
+    self.root.option_add('*Menu.background', secondary_bg)
+    self.root.option_add('*Menu.foreground', text_color)
+    self.root.option_add('*Menu.activeBackground', accent_color)
+    self.root.option_add('*Menu.activeForeground', '#FFFFFF')
+    self.root.option_add('*Menu.font', ('Microsoft YaHei UI', 9))
+
+    # 标签样式
+    style.configure('TLabel',
+                    background=main_bg,
+                    foreground=text_color,
+                    font=('Microsoft YaHei UI', 10))
+
+    # 进度条样式
+    style.configure('Horizontal.TScale',
+                    background=main_bg,
+                    troughcolor='#FFE0B2',
+                    slidercolor=accent_color)
+
+    # 树形视图样式
+    style.configure('Treeview',
+                    background=secondary_bg,
+                    fieldbackground=secondary_bg,
+                    foreground=text_color,
+                    font=('Microsoft YaHei UI', 9))
+    style.map('Treeview',
+              background=[('selected', accent_color)],
+              foreground=[('selected', '#FFFFFF')])
+
+    style.configure('Treeview.Heading',
+                    background='#FFE0B2',
+                    foreground=text_color,
+                    font=('Microsoft YaHei UI', 9, 'bold'))
+
+    # 文本框样式
+    self.root.option_add('*Text.background', secondary_bg)
+    self.root.option_add('*Text.foreground', text_color)
+    self.root.option_add('*Text.selectBackground', accent_color)
+    self.root.option_add('*Text.selectForeground', '#FFFFFF')
+    self.root.option_add('*Text.font', ('Microsoft YaHei UI', 10))
+
+    # 添加状态栏
+    self.status_bar = ttk.Label(self.root, relief=tk.SUNKEN, anchor=tk.W)
+    self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+
+    # 创建主框架
+    main_frame = ttk.Frame(self.root)
+    main_frame.pack(fill="both", expand=True, padx=10, pady=5)
+
+    # 左侧文件夹树形结构
+    folder_frame = ttk.LabelFrame(main_frame, text="文件夹")
+    folder_frame.pack(side="left", fill="both", expand=True, padx=5)
+
+    # 创建树形视图
+    self.folder_tree = ttk.Treeview(folder_frame, selectmode="browse")
+    self.folder_tree.pack(side="left", fill="both", expand=True)
+
+    # 添加滚动条
+    tree_scroll = ttk.Scrollbar(folder_frame, orient="vertical",
+                                command=self.folder_tree.yview)
+    tree_scroll.pack(side="right", fill="y")
+    self.folder_tree.configure(yscrollcommand=tree_scroll.set)
+
+    # 设置树形列头
+    self.folder_tree["columns"] = ("duration",)
+    self.folder_tree.column("#0", width=300, minwidth=200)
+    self.folder_tree.column("duration", width=100, minwidth=50)
+    self.folder_tree.heading("#0", text="名称")
+    self.folder_tree.heading("duration", text="时长")
+
+    # 绑定树形视图事件
+    self.folder_tree.bind("<Double-1>", self.on_tree_double_click)
+    self.folder_tree.bind("<Button-1>", self.on_tree_single_click)
+
+    # 右侧控制面板
+    self.control_frame = ttk.Frame(main_frame)  # 修复：将 control_frame 保存为实例变量
+    self.control_frame.pack(side="right", fill="both", padx=5)
+
+    # 文件操作按钮
+    file_frame = ttk.LabelFrame(self.control_frame, text="文件操作")  # 修复：使用 self.control_frame
+    file_frame.pack(fill="x", pady=5)
+
+    ttk.Button(file_frame, text="添加文件夹",
+               command=self.add_folder).pack(side="left", padx=5)
+    ttk.Button(file_frame, text="移除选中文件夹",
+               command=self.remove_selected_folder).pack(side="left", padx=5)
+    ttk.Button(file_frame, text="播放选中文件夹",
+               command=self.play_selected_folder).pack(side="left", padx=5)
+
+    # 播放模式选择
+    mode_frame = ttk.LabelFrame(self.control_frame, text="播放模式")  # 修复：使用 self.control_frame
+    mode_frame.pack(fill="x", pady=5)
+
+    # 新增循环次数输入框
+    loop_frame = ttk.Frame(mode_frame)
+    loop_frame.pack(side="left", padx=5)
+    ttk.Label(loop_frame, text="循环次数:").pack(side="left")
+    self.loop_count = tk.IntVar(value=1)  # 默认循环1次
+    self.loop_spin = ttk.Spinbox(loop_frame, from_=1, to=999, width=3, textvariable=self.loop_count)
+    self.loop_spin.pack(side="left", padx=2)
+
+    self.mode_var = tk.StringVar(value=self.play_mode)
+    ttk.Radiobutton(mode_frame, text="顺序播放", variable=self.mode_var,
+                    value="sequential").pack(side="left")
+    ttk.Radiobutton(mode_frame, text="单曲循环", variable=self.mode_var,
+                    value="loop_one").pack(side="left")
+    ttk.Radiobutton(mode_frame, text="列表循环", variable=self.mode_var,
+                    value="loop_all").pack(side="left")
+
+    # 播放控制
+    control_buttons = ttk.Frame(self.control_frame)  # 修复：使用 self.control_frame
+    control_buttons.pack(fill="x", pady=5)
+
+    self.play_button = ttk.Button(control_buttons, text="播放",
+                                  command=self.play_pause)
+    self.play_button.pack(side="left", padx=5)
+
+    ttk.Button(control_buttons, text="上一曲",
+               command=self.previous_track).pack(side="left", padx=5)
+    ttk.Button(control_buttons, text="下一曲",
+               command=self.next_track).pack(side="left", padx=5)
+    ttk.Button(control_buttons, text="停止",
+               command=self.stop).pack(side="left", padx=5)
+
+    # 音量控制 - 直接设置初始值
+    volume_frame = ttk.LabelFrame(self.control_frame, text="音量控制")  # 修复：使用 self.control_frame
+    volume_frame.pack(fill="x", pady=5)
+
+    self.volume_scale = ttk.Scale(
+        volume_frame,
+        from_=0,
+        to=100,
+        orient="horizontal",
+        command=lambda v: self.set_volume(v)  # 使用 set_volume
+    )
+    self.volume_scale.set(50)  # 强制设置为50
+    self.volume_scale.pack(fill="x", padx=5)
+
+    # 当前播放信息
+    self.info_label = ttk.Label(self.control_frame, text="未播放")  # 修复：使用 self.control_frame
+    self.info_label.pack(pady=5)
+
+    # 添加跟读控制区域
+    self.follow_frame = ttk.LabelFrame(self.control_frame, text="跟读控制")  # 修复：保存为实例变量
+    self.follow_frame.pack(fill="x", pady=5)
+
+    # 在 follow_frame 中创建一个横向按钮框架
+    button_frame = ttk.Frame(self.follow_frame)
+    button_frame.pack(fill="x", pady=5)
+
+    # 字幕编辑按钮和跟读按钮水平放置
+    self.edit_subtitle_btn = ttk.Button(
+        button_frame,  # 改为使用 button_frame
+        text="修改字幕",
+        command=self.edit_current_subtitles
+    )
+    self.edit_subtitle_btn.pack(side="left", padx=5)  # 使用 side="left"
+
+    self.follow_button = ttk.Button(
+        button_frame,  # 改为使用 button_frame
+        text="开始跟读",
+        command=self.toggle_follow_reading
+    )
+    self.follow_button.pack(side="left", padx=5)  # 使用 side="left"
+
+    # 在跟读控制区域添加字幕偏移控制
+    offset_frame = ttk.Frame(self.follow_frame)
+    offset_frame.pack(fill="x", pady=5)
+    ttk.Label(offset_frame, text="字幕偏移:").pack(side="left")
+    ttk.Button(offset_frame, text="-0.5s",
+               command=lambda: self.adjust_subtitle_offset(-500)).pack(side="left")
+    ttk.Button(offset_frame, text="+0.5s",
+               command=lambda: self.adjust_subtitle_offset(500)).pack(side="left")
+
+    # 修改语速控制布局
+    speed_frame = ttk.LabelFrame(self.follow_frame, text="语速控制")
+    speed_frame.pack(fill="x", pady=5)
+
+    # 语速滑动条
+    speed_scale_frame = ttk.Frame(speed_frame)
+    speed_scale_frame.pack(fill="x", pady=2)
+    ttk.Label(speed_scale_frame, text="语速:").pack(side="left", padx=5)
+    self.speed_scale = ttk.Scale(speed_scale_frame, from_=0.5, to=2.0,
+                                 orient="horizontal",
+                                 command=self.on_speed_change)
+    self.speed_scale.set(1.0)
+    self.speed_scale.pack(side="left", fill="x", expand=True, padx=10)
+
+    # 语速微调按钮
+    speed_adjust_frame = ttk.Frame(speed_frame)
+    speed_adjust_frame.pack(side="right", padx=5)
+    ttk.Button(speed_adjust_frame, text="-0.1", width=5,
+               command=lambda: self.adjust_speed(-0.1)).pack(side="left", padx=2)
+    ttk.Button(speed_adjust_frame, text="+0.1", width=5,
+               command=lambda: self.adjust_speed(0.1)).pack(side="left", padx=2)
+
+    # 预设速度按钮 - 新的一行
+    preset_frame = ttk.Frame(speed_frame)
+    preset_frame.pack(fill="x", pady=2)
+    ttk.Label(preset_frame, text="预设:").pack(side="left", padx=5)
+    for speed in self.player_config['speed_presets']:
+        ttk.Button(preset_frame, text=f"{speed}x", width=5,
+                   command=lambda s=speed: self.set_playback_speed(s)).pack(side="left", padx=2)
+
+    # 跟读文本显示区域
+    text_frame = ttk.LabelFrame(self.control_frame, text="跟读结果")  # 修复：使用 self.control_frame
+    text_frame.pack(fill="both", expand=True, pady=5)
+
+    self.follow_text = tk.Text(text_frame, height=9, width=40)
+    self.follow_text.pack(pady=5, padx=5, fill="both", expand=True)
+
+    # 字幕样式配置
+    self.follow_text.tag_configure('en', foreground='blue', font=('Consolas', 10))
+    self.follow_text.tag_configure('cn', foreground='green', font=('Microsoft YaHei', 10))
+    self.follow_text.tag_configure('time', foreground='gray')
+
+    # 在创建 follow_text 后添加更多文本样式
+    self.follow_text.tag_configure('prompt', foreground='purple')
+    self.follow_text.tag_configure('recognized', foreground='blue', font=('Consolas', 10))
+    self.follow_text.tag_configure('title', foreground='green', font=('Arial', 10, 'bold'))
+    self.follow_text.tag_configure('error', foreground='red')
+
+    # 播放进度控制
+    progress_frame = ttk.LabelFrame(self.control_frame, text="播放进度")  # 修复：使用 self.control_frame
+    progress_frame.pack(fill="x", pady=5)
+
+    # 快进快退按钮和进度条框架
+    progress_control_frame = ttk.Frame(progress_frame)
+    progress_control_frame.pack(fill="x", padx=5)
+
+    self.create_follow_control_buttons()
+
+    # 后退2秒
+    ttk.Button(progress_control_frame, text="◀◀", width=3,
+               command=lambda: self.seek_relative(-2)).pack(side="left", padx=2)
+
+    # 进度条
+    self.progress_scale = ttk.Scale(progress_control_frame, from_=0, to=100,
+                                    orient="horizontal",
+                                    command=self.seek_absolute)
+    self.progress_scale.pack(side="left", fill="x", expand=True, padx=5)
+
+    # 前进2秒
+    ttk.Button(progress_control_frame, text="▶▶", width=3,
+               command=lambda: self.seek_relative(2)).pack(side="left", padx=2)
+
+    # 时间显示框架
+    time_frame = ttk.Frame(progress_frame)
+    time_frame.pack(fill="x", padx=5)
+
+    # 当前时间/总时间
+    self.time_label = ttk.Label(time_frame, text="00:00 / 00:00")
+    self.time_label.pack(side="right", padx=5)
+
+    # 进度条事件绑定
+    self.progress_scale.bind("<Button-1>", self.on_progress_press)
+    self.progress_scale.bind("<ButtonRelease-1>", self.on_progress_release)
+
+    # 添加波形显示
+    wave_frame = ttk.LabelFrame(self.control_frame, text="音频波形")  # 修复：使用 self.control_frame
+    wave_frame.pack(fill="x", pady=5)
+    self.wave_canvas = tk.Canvas(wave_frame, height=60, bg='white')
+    self.wave_canvas.pack(fill="x", padx=5)
+
+    # 添加播放列表功能按钮
+    playlist_frame = ttk.Frame(self.control_frame)  # 修复：使用 self.control_frame
+    playlist_frame.pack(fill="x", pady=5)
+    ttk.Button(playlist_frame, text="导出列表",
+               command=self.export_playlist).pack(side="left", padx=2)
+    ttk.Button(playlist_frame, text="导入列表",
+               command=self.import_playlist).pack(side="left", padx=2)
+    ttk.Button(playlist_frame, text="收藏",
+               command=self.toggle_favorite).pack(side="left", padx=2)
+
+    # 修改文本标签样式
+    self.follow_text.tag_configure('en',
+                                   foreground='#2980B9',
+                                   font=('Microsoft YaHei UI', 11))
+    self.follow_text.tag_configure('cn',
+                                   foreground='#16A085',
+                                   font=('Microsoft YaHei UI', 10))
+    self.follow_text.tag_configure('time',
+                                   foreground='#7F8C8D',
+                                   font=('Microsoft YaHei UI', 9))
+    self.follow_text.tag_configure('prompt',
+                                   foreground='#8E44AD',
+                                   font=('Microsoft YaHei UI', 10))
+    self.follow_text.tag_configure('recognized',
+                                   foreground='#2980B9',
+                                   font=('Microsoft YaHei UI', 11))
+    self.follow_text.tag_configure('title',
+                                   foreground=accent_color,
+                                   font=('Microsoft YaHei UI', 11, 'bold'))
+    self.follow_text.tag_configure('error',
+                                   foreground='#C0392B',
+                                   font=('Microsoft YaHei UI', 10))
+
+    # 修改波形显示画布背景
+    if hasattr(self, 'wave_canvas'):
+        self.wave_canvas.configure(bg=secondary_bg)
+
+    # 修改状态栏样式
+    self.status_bar.configure(
+        background=main_bg,
+        foreground=text_color,
+        font=('Microsoft YaHei UI', 9)
+    )
+
+    style.configure('TFrame', background=main_bg)
+    self.follow_button = ttk.Button(self.root, text="跟读", command=self.toggle_follow_mode)
+    self.follow_button.pack(pady=5)
+
+    self.load_button = ttk.Button(self.root, text="加载音频和字幕", command=self.load_files)
+    self.load_button.pack(pady=5)
+
+
+def show_stats(self):
+    """改进的统计信息显示功能"""
+    try:
+        stats_window = tk.Toplevel(self.root)
+        stats_window.title("播放统计")
+        stats_window.geometry("400x500")
+
+        # 计算会话时长
+        session_duration = time.time() - self.stats['session_start']
+        total_hours = self.stats['total_play_time'] / 3600
+
+        # 创建统计信息文本
+        stats_text = tk.Text(stats_window, wrap=tk.WORD, padx=10, pady=10)
+        stats_text.pack(fill=tk.BOTH, expand=True)
+
+        stats_info = [
+            ("播放统计", "-" * 40),
+            ("总播放时长", f"{total_hours:.2f}小时"),
+            ("本次会话时长", f"{session_duration / 3600:.2f}小时"),
+            ("播放文件数", len(self.stats['played_files'])),
+            ("收藏文件数", len(self.favorites)),
+            ("文件夹数量", len(self.folders)),
+            ("", "-" * 40),
+            ("最近播放", "最后播放时间" if self.stats['last_played'] else "无"),
+            ("", time.strftime("%Y-%m-%d %H:%M:%S",
+                               time.localtime(self.stats['last_played'])) if self.stats['last_played'] else "")
+        ]
+
+        for title, value in stats_info:
+            stats_text.insert(tk.END, f"{title}: {value}\n")
+
+        stats_text.config(state=tk.DISABLED)
+
+    except Exception as e:
+        self.update_status(f"显示统计信息失败: {str(e)}", 'error')
+
+
+def check_follow_status(self, original_wait_time):
+    """检查跟读状态"""
+    if not self.is_following:
+        return
+
+    current_time = time.time()
+    if (current_time - self.follow_reader.last_audio_time >= self.follow_reader.silence_threshold or
+            current_time - self.follow_reader.last_audio_time >= original_wait_time / 1000):
+
+        # 如果没有检测到语音输入且已经过了最短等待时间
+        if not self.follow_reader.frames and current_time - self.follow_reader.last_audio_time >= self.follow_reader.min_wait_time:
+            self.follow_text.insert('end', "\n未检测到语音输入，继续下一段\n", 'warning')
+            self.continue_after_playback()
+            return
+
+        # 处理录音
+        self.process_follow_reading()
+    else:
+        # 继续等待
+        self.root.after(100, lambda: self.check_follow_status(original_wait_time))
+
+
+def show_shortcuts(self):
+    """显示快捷键列表"""
+    try:
+        shortcuts_window = tk.Toplevel(self.root)
+        shortcuts_window.title("快捷键")
+        shortcuts_window.geometry("300x400")
+
+        shortcuts_text = tk.Text(shortcuts_window, wrap=tk.WORD, padx=10, pady=10)
+        shortcuts_text.pack(fill=tk.BOTH, expand=True)
+
+        shortcuts_info = [
+            ("播放/暂停", "Space 或 Ctrl+P"),
+            ("停止", "Esc"),
+            ("上一曲", "无"),
+            ("下一曲", "无"),
+            ("快退", "Left"),
+            ("快进", "Right"),
+            ("长距离快退", "Ctrl+Left"),
+            ("长距离快进", "Ctrl+Right"),
+            ("音量增大", "Up"),
+            ("音量减小", "Down"),
+            ("语速加快", "Ctrl+Up"),
+            ("语速减慢", "Ctrl+Down"),
+            ("跟读模式", "Ctrl+F"),
+            ("保存状态", "Ctrl+S")
+        ]
+
+        for action, keys in shortcuts_info:
+            shortcuts_text.insert(tk.END, f"{action}: {keys}\n")
+
+        shortcuts_text.config(state=tk.DISABLED)
+
+    except Exception as e:
+        self.update_status(f"显示快捷键帮助失败: {str(e)}", 'error')
+
+
+def cleanup_and_continue(self, playback_file, transcribe_file):
+    """修复的文件清理功能"""
+    try:
+        # 先停止播放避免文件占用
+        pygame.mixer.music.stop()
+        pygame.mixer.music.unload()
+
+        # 等待一小段时间确保文件释放
+        time.sleep(0.1)
+
+        # 确保文件存在再删除
+        if playback_file and os.path.exists(playback_file):
+            try:
+                os.remove(playback_file)
+            except Exception as e:
+                logging.warning(f"清理播放文件失败: {e}")
+
+        if transcribe_file and os.path.exists(transcribe_file):
+            try:
+                os.remove(transcribe_file)
+            except Exception as e:
+                logging.warning(f"清理转写文件失败: {e}")
+
+    except Exception as e:
+        logging.error(f"清理临时文件失败: {e}")
+    finally:
+        # 无论清理是否成功都继续下一步
+        self.continue_after_playback()
+
+
+def continue_after_playback(self):
+    """回放结束后继续播放"""
+
+    try:
+        # 先检查当前段落
+        self.current_segment += 1
+        if self.current_segment < self.total_segments:
+            # 当前音频还有下一段，继续播放
+            self.follow_text.insert('end', "\n=== 准备下一段 ===\n", 'prompt')
+            self.play_segment()
+            return
+
+        # 当前音频的所有段落已播放完，检查循环次数
+        self.current_loop += 1
+        if self.current_loop < self.max_follow_loops:
+            # 当前音频还需要再循环
+            self.current_segment = 0
+            self.follow_text.insert('end', f"\n开始第 {self.current_loop + 1} 轮跟读\n", 'title')
+            self.play_segment()
+            return
+
+        # 当前音频已完成所有循环，检查播放模式
+        play_mode = self.mode_var.get()
+
+        if play_mode == "loop_one":
+            # 单曲循环模式：重置循环次数和段落，继续播放
+            self.current_loop = 0
+            self.current_segment = 0
+            self.follow_text.insert('end', "\n重新开始跟读当前音频\n", 'title')
+            self.play_segment()
+
+        elif self.current_index < len(self.current_playlist) - 1:
+            # 还有下一个音频文件要播放
+            self.current_index += 1
+            self.current_loop = 0
+            self.current_segment = 0
+            self.follow_text.insert('end', f"\n开始跟读下一个音频文件\n", 'title')
+            self.start_follow_reading()
+
+        elif play_mode == "loop_all":
+            # 列表循环模式：回到第一个文件
+            self.current_index = 0
+            self.current_loop = 0
+            self.current_segment = 0
+            self.follow_text.insert('end', "\n重新开始跟读播放列表\n", 'title')
+            self.start_follow_reading()
+
+        else:
+            # 顺序播放且已到最后一个文件：停止跟读
+            self.stop_follow_reading()
+
+    except Exception as e:
+        logging.error(f"继续播放失败: {e}")
+        self.update_status("继续播放失败", 'error')
+
+
+def stop_follow_reading(self):
+    """改进的停止跟读功能"""
+    if not self.is_following:  # 避免重复调用
+        return
+
+    try:
+        self.is_following = False
+        self.follow_button.config(text="开始跟读")
+
+        # 清理音频资源前先停止所有播放
+        self._cleanup_audio_resources()
+
+        # 重置状态
+        self.is_playing = False
+        self._retry_count = 0
+        self.current_segment = 0
+        self.current_position = 0
+
+        self.follow_text.insert('end', "跟读已停止\n")
+        self.follow_text.see('end')
+
+        # 延迟后再启动普通播放
+        self.root.after(500, self._resume_normal_playback)
+
+        self.update_status("跟读已停止", 'info')
+
+    except Exception as e:
+        logging.error(f"停止跟读失败: {e}")
+        self.update_status("停止跟读失败", 'error')
+
+
+def _resume_normal_playback(self):
+    """改进的恢复普通播放功能"""
+    try:
+        if not self.current_playlist:
+            self.update_status("没有可播放的文件", 'warning')
+            return
+
+        # 完全清理资源
+        self._cleanup_audio_resources()
+
+        # 重置播放状态
+        self.current_position = 0
+        self._start_time = 0
+
+        # 重新加载并播放
+        current_file = self.current_playlist[self.current_index]
+        pygame.mixer.music.load(current_file)
+        self.root.after(50, lambda: pygame.mixer.music.play())  # 延迟播放避免加载未完成
+
+        # 设置音量
+        pygame.mixer.music.set_volume(self._volume / 100.0)
+
+        # 开始播放
+        self.is_playing = True
+        self.play_button.config(text="暂停")
+
+        # 加载字幕
+        self.load_subtitles(current_file)
+
+        # 立即更新字幕
+        if self.subtitles:
+            subtitle = self._find_subtitle_optimized(0)
+            if subtitle:
+                self.follow_text.delete('1.0', 'end')
+                self.show_current_subtitle(subtitle)
+                self._update_tree_selection()
+
+        # 更新显示
+        self.update_info_label()
+        total_length = self.get_current_audio_length()
+        self.progress_scale.set(0)
+        self.time_label.config(text=f"00:00 / {self.format_time(total_length)}")
+
+        # 启动进度更新
+        self.update_progress()
+
+    except Exception as e:
+        logging.error(f"恢复普通播放失败: {e}")
+        logging.error(f"恢复普通播放失败: {e}")
+
+
+def calculate_improved_similarity(self, text1, text2):
+    """改进的文本相似度计算"""
+    try:
+        # 文本预处理
+        def preprocess(text):
+            # 转小写，去除标点
+            text = re.sub(r'[^\w\s]', '', text.lower())
+            # 分词
+            return text.split()
+
+        words1 = preprocess(text1)
+        words2 = preprocess(text2)
+
+        if not words1 or not words2:
+            return 0
+
+        # 计算词级别匹配
+        matches = 0
+        total_words = len(words1)
+
+        for w1 in words1:
+            if w1 in words2:
+                matches += 1
+
+        # 考虑词序
+        order_bonus = 0
+        for i in range(len(words1) - 1):
+            if i < len(words2) - 1:
+                if words1[i] == words2[i] and words1[i + 1] == words2[i + 1]:
+                    order_bonus += 0.5
+
+        # 计算最终得分
+        base_score = (matches / total_words) * 100
+        final_score = min(100, base_score + order_bonus)
+
+        return final_score
+
+    except Exception as e:
+        logging.error(f"计算相似度失败: {e}")
+        return 0
+
+
+def get_feedback(self, similarity):
+    """根据相似度生成更详细的反馈"""
+    if (similarity >= 90):
+        return "★★★★★ 太棒了！发音非常准确！"
+    elif (similarity >= 80):
+        return "★★★★☆ 非常好！继续保持！"
+    elif (similarity >= 70):
+        return "★★★☆☆ 不错！还可以更好！"
+    elif (similarity >= 60):
+        return "★★☆☆☆ 基本正确，需要多练习"
+    elif (similarity >= 50):
+        return "★☆☆☆☆ 继续努力，重点注意发音"
+    else:
+        return "☆☆☆☆☆ 加油，建议多听多练"
+
+
+def show_about(self):
+    """显示关于信息"""
+    try:
+        about_window = tk.Toplevel(self.root)
+        about_window.title("关于")
+        about_window.geometry("300x200")
+
+        about_label = ttk.Label(about_window,
+                                text="""英语语感听说助手\n版本: 1.0\n作者: 林溪木\n日期: 2025-02-01""",
+                                padding=10)
+        about_label.pack(expand=True, fill=tk.BOTH)
+
+    except Exception as e:
+        self.update_status(f"显示关于信息失败: {str(e)}", 'error')
+
+
+def export_playlist(self):
+    """导出播放列表"""
+    try:
+        if not self.current_playlist:
+            self.update_status("当前没有播放列表", 'warning')
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".m3u",
+            filetypes=[("M3U Playlist", "*.m3u"), ("All files", "*.*")]
+        )
+
+        if file_path:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write("#EXTM3U\n")  # M3U 文件头
+                for file in self.current_playlist:
+                    f.write(file + '\n')
+
+            self.update_status("播放列表导出成功", 'success')
+
+    except Exception as e:
+        self.update_status(f"导出播放列表失败: {str(e)}", 'error')
+
+
+def import_playlist(self):
+    """导入播放列表"""
+    try:
+        file_path = filedialog.askopenfilename(
+            defaultextension=".m3u",
+            filetypes=[("M3U Playlist", "*.m3u"), ("All files", "*.*")]
+        )
+
+        if file_path:
+            files = []
+            with open(file_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        if os.path.exists(line):  # 检查文件是否存在
+                            files.append(line)
+                        else:
+                            logging.warning(f"播放列表中的文件不存在: {line}")
+
+            # 过滤掉不存在的文件
+            files = [f for f in files if os.path.exists(f)]
+
+            # 只有当成功导入至少一个文件时才更新播放列表
+            if files:
+                self.current_playlist = files
+                self.current_index = 0
+                self.play_current_track()
+                self.update_status("播放列表导入成功", 'success')
+
+    except Exception as e:
+        self.update_status(f"导入播放列表失败: {str(e)}", 'error')
+
+
+def toggle_favorite(self):
+    """切换收藏状态"""
+    try:
+        if not self.current_playlist or self.current_index >= len(self.current_playlist):
+            self.update_status("没有可收藏的音频", 'warning')
+            return
+
+        current_file = self.current_playlist[self.current_index]
+
+        if current_file in self.favorites:
+            self.favorites.remove(current_file)
+            self.update_status("已取消收藏", 'info')
+        else:
+            self.favorites.add(current_file)
+            self.update_status("已添加到收藏", 'success')
+
+        # 保存收藏列表
+        self.save_favorites()
+
+    except Exception as e:
+        self.update_status(f"收藏操作失败: {str(e)}", 'error')
+
+
+def save_favorites(self):
+    """保存收藏列表"""
+    try:
+        favorites_file = os.path.join(self.config_dir, 'favorites.json')
+        with open(favorites_file, 'w', encoding='utf-8') as f:
+            json.dump(list(self.favorites), f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.error(f"保存收藏失败: {e}")
+
+
+def update_stats(self):
+    """更新播放统计"""
+    try:
+        if self.is_playing:
+            current_file = self.current_playlist[self.current_index]
+            self.stats['played_files'].add(current_file)
+            self.stats['last_played'] = current_file
+            self.stats['total_play_time'] += 0.1  # 每100ms更新一次
+
+        # 每分钟保存一次统计数据
+        self.root.after(60000, self.save_stats)
+
+    except Exception as e:
+        logging.error(f"更新统计失败: {e}")
+
+
+def save_stats(self):
+    """保存播放统计"""
+    try:
+        stats_file = os.path.join(self.config_dir, 'stats.json')
+        stats_data = {
+            'total_play_time': self.stats['total_play_time'],
+            'played_files': list(self.stats['played_files']),
+            'last_played': self.stats['last_played'],
+            'last_update': time.strftime('%Y-%m-%d %H:%M:%S')
+        }
+
+        with open(stats_file, 'w', encoding='utf-8') as f:
+            json.dump(stats_data, f, ensure_ascii=False, indent=2)
+
+    except Exception as e:
+        logging.error(f"保存统计失败: {e}")
+
+
+def create_context_menu(self):
+    """改进的右键菜单创建功能"""
+    try:
+        self.context_menu = tk.Menu(self.root, tearoff=0)
+
+        # 文件夹树的右键菜单
+        self.folder_menu = tk.Menu(self.root, tearoff=0)
+        self.folder_menu.add_command(label="播放", command=self.play_selected_item)
+        self.folder_menu.add_command(label="添加到收藏", command=self.add_to_favorites)
+        self.folder_menu.add_separator()
+        self.folder_menu.add_command(label="重命名", command=self.rename_item)
+        self.folder_menu.add_command(label="删除", command=self.remove_selected_item)
+
+        # 绑定右键菜单
+        self.folder_tree.bind("<Button-3>", self.show_context_menu)
+
+    except Exception as e:
+        self.update_status(f"创建右键菜单失败: {str(e)}", 'error')
+
+
+def show_context_menu(self, event):
+    """改进的右键菜单显示功能"""
+    try:
+        # 获取点击的项目
+        item = self.folder_tree.identify('item', event.x, event.y)
+        if item:
+            # 选中被点击的项目
+            self.folder_tree.selection_set(item)
+            # 显示菜单
+            self.folder_menu.post(event.x_root, event.y_root)
+    except Exception as e:
+        self.update_status(f"显示右键菜单失败: {str(e)}", 'error')
+
+
+def rename_item(self):
+    """改进的重命名功能"""
+    try:
+        selected = self.folder_tree.selection()
+        if not selected:
+            return
+
+        item = selected[0]
+        old_name = self.folder_tree.item(item)['text']
+
+        # 创建重命名对话框
+        dialog = tk.Toplevel(self.root)
+        dialog.title("重命名")
+        dialog.geometry("300x100")
+
+        ttk.Label(dialog, text="新名称:").pack(pady=5)
+        entry = ttk.Entry(dialog)
+        entry.insert(0, old_name)
+        entry.pack(pady=5)
+        entry.select_range(0, tk.END)
+
+        def do_rename():
+            new_name = entry.get()
+            if new_name and new_name != old_name:
+                try:
+                    # 更新树形视图
+                    self.folder_tree.item(item, text=new_name)
+
+                    # 如果是文件夹，更新文件夹字典
+                    if item in self.folders:
+                        folder_info = self.folders[item]
+                        new_path = os.path.join(os.path.dirname(folder_info['path']), new_name)
+                        os.rename(folder_info['path'], new_path)
+                        folder_info['path'] = new_path
+
+                    self.save_settings()
+                    self.update_status(f"重命名成功: {new_name}", 'success')
+                except Exception as e:
+                    self.update_status(f"重命名失败: {str(e)}", 'error')
+
+            dialog.destroy()
+
+        ttk.Button(dialog, text="确定", command=do_rename).pack(side=tk.LEFT, padx=20)
+        ttk.Button(dialog, text="取消", command=dialog.destroy).pack(side=tk.RIGHT, padx=20)
+
+        # 设置焦点并绑定回车键
+        entry.focus_set()
+        entry.bind('<Return>', lambda e: do_rename())
+
+    except Exception as e:
+        self.update_status(f"重命名操作失败: {str(e)}", 'error')
+
+
+def _serialize_folder_data(self):
+    """序列化文件夹数据，处理不可序列化的内容"""
+    serializable_folders = {}
+    for folder_id, folder_info in self.folders.items():
+        serializable_folders[str(folder_id)] = {
+            'path': folder_info['path'],
+            'files': list(folder_info['files']),  # 确保是列表
+            'expanded': bool(folder_info['expanded'])  # 确保是布尔值
+        }
+    return serializable_folders
+
+
+def _deserialize_folder_data(self, data):
+    """反序列化文件夹数据"""
+    folders = {}
+    for folder_id, folder_info in data.items():
+        folders[folder_id] = {
+            'path': str(folder_info['path']),
+            'files': list(folder_info['files']),
+            'expanded': bool(folder_info['expanded'])
+        }
+    return folders
+
+
+def _encode_json_safe(self, obj):
+    """安全的JSON编码处理"""
+    if isinstance(obj, set):
+        return list(obj)
+    if isinstance(obj, bytes):
+        return obj.decode('utf-8')
+    return str(obj)
+
+
+def save_settings(self):
+    """改进的设置保存功能，确保文件夹持久化"""
+    try:
+        settings = {
+            'folders': {},  # 用于存储处理后的文件夹数据
+            'volume': self._volume,
+            'speed': self.speed_scale.get(),
+            'subtitle_offset': self._playback.get('time_offset', 0),
+            'loop_count': self.loop_count.get(),
+            'play_mode': self.mode_var.get()
+        }
+
+        # 遍历 self.folders，将每个文件夹的信息序列化
+        for tree_id, folder_info in self.folders.items():
+            folder_path = folder_info['path']
+            settings['folders'][folder_path] = {  # 使用文件夹路径作为键
+                'path': folder_path,
+                'files': folder_info['files'],
+                'expanded': folder_info['expanded']
+            }
+
+        # 保存到文件
+        with open(self.settings_file, 'w', encoding='utf-8') as f:
+            json.dump(settings, f, ensure_ascii=False, indent=2)
+
+        self.update_status("设置已保存", 'success')
+        return True
+
+    except Exception as e:
+        self.update_status(f"保存设置失败: {str(e)}", 'error')
+        return False
+
+
+def load_settings(self):
+    """改进的设置加载功能，确保文件夹正确恢复"""
+    try:
+        if os.path.exists(self.settings_file):
+            with open(self.settings_file, 'r', encoding='utf-8') as f:
+                settings = json.load(f)
+
+            # 清空当前树形视图
+            for item in self.folder_tree.get_children():
+                self.folder_tree.delete(item)
+
+            # 重置文件夹字典
+            self.folders = {}
+
+            # 加载文件夹信息
+            loaded_folders = settings.get('folders', {})
+            for folder_path, folder_data in loaded_folders.items():
+                if os.path.exists(folder_path):  # 检查文件夹是否存在
+                    folder_name = os.path.basename(folder_path)
+                    # 创建树形视图节点
+                    tree_id = self.folder_tree.insert(
+                        "", "end",
+                        text=folder_name,
+                        values=(f"{len(folder_data['files'])}个文件",)
+                    )
+
+                    # 保存到文件夹字典
+                    self.folders[tree_id] = {
+                        'path': folder_path,
+                        'files': folder_data['files'],
+                        'expanded': folder_data['expanded']
+                    }
+
+                    # 如果之前是展开状态，重新展开
+                    if folder_data['expanded']:
+                        self.expand_folder(tree_id)
+
+            # 恢复其他设置
+            self.volume = settings.get('volume', 50)
+            self.speed_scale.set(settings.get('speed', 1.0))
+            self._playback['time_offset'] = settings.get('subtitle_offset', 0)
+            self.loop_count.set(settings.get('loop_count', 1))
+            self.mode_var.set(settings.get('play_mode', 'sequential'))
+
+            self.update_status("设置已加载", 'success')
+            return True
+
+    except Exception as e:
+        self.update_status(f"加载设置失败: {str(e)}", 'error')
+        return False
+
+
+def delete_settings(self):
+    """删除设置文件"""
+    try:
+        if messagebox.askyesno("确认", "确定要删除所有设置文件吗？"):
+            files_to_delete = [
+                self.settings_file,
+                self.state_file,
+                self.history_file,
+                self.favorites_file
+            ]
+
+            for file in files_to_delete:
+                if os.path.exists(file):
+                    os.remove(file)
+
+            self.update_status("所有设置文件已删除", 'success')
+            messagebox.showinfo("成功", "设置已删除，程序将重新启动")
+            self.root.after(1000, self.restart_application)
+    except Exception as e:
+        self.update_status(f"删除设置失败: {str(e)}", 'error')
+
+
+def restart_application(self):
+    """重启应用程序"""
+    python = sys.executable
+    os.execl(python, python, *sys.argv)
+
+
+def clean_settings(self):
+    """清理设置文件"""
+    try:
+        if os.path.exists(self.settings_file):
+            os.remove(self.settings_file)
+            self.update_status("设置文件已删除", 'success')
+        if os.path.exists(self.state_file):
+            os.remove(self.state_file)
+            self.update_status("状态文件已删除", 'success')
+        return True
+    except Exception as e:
+        self.update_status(f"清理设置失败: {str(e)}", 'error')
+        return False
+
+
+def add_to_favorites(self):
+    """改进的添加收藏功能"""
+    try:
+        selected = self.folder_tree.selection()
+        if not selected:
+            return
+
+        item = selected[0]
+
+        # 如果是文件夹，添加所有音频文件
+        if item in self.folders:
+            for file_path in self.folders[item]['files']:
+                self.favorites.add(file_path)
+            self.update_status(f"文件夹已添加到收藏", 'success')
+        else:
+            # 如果是单个文件
+            parent = self.folder_tree.parent(item)
+            if parent in self.folders:
+                file_name = self.folder_tree.item(item)['text']
+                for file_path in self.folders[parent]['files']:
+                    if os.path.basename(file_path) == file_name:
+                        self.favorites.add(file_path)
+                        self.update_status(f"文件已添加到收藏", 'success')
+                        break
+
+        # 保存收藏状态
+        self.save_player_state()
+
+    except Exception as e:
+        self.update_status(f"添加收藏失败: {str(e)}", 'error')
+
+
+def get_audio_info(self, file_path):
+    """改进的音频信息获取功能"""
+    try:
+        info = {
+            'duration': 0,
+            'channels': 0,
+            'sample_rate': 0,
+            'bit_rate': 0,
+            'format': None
+        }
+
+        # 尝试使用wave模块获取信息
+        try:
+            with wave.open(file_path, 'rb') as wf:
+                info['channels'] = wf.getnchannels()
+                info['sample_rate'] = wf.getframerate()
+                frames = wf.getnframes()
+                info['duration'] = frames / float(info['sample_rate'])
+                info['format'] = 'wav'
+        except:
+            # 如果不是wav文件，使用pygame获取时长
+            audio = pygame.mixer.Sound(file_path)
+            info['duration'] = audio.get_length()
+            info['format'] = os.path.splitext(file_path)[1][1:]
+
+        return info
+
+    except Exception as e:
+        print(f"获取音频信息失败: {e}")
+        return None
+
+
+def show_current_subtitle(self, subtitle):
+    """改进的字幕显示功能"""
+    try:
+        text = subtitle.get('text', '')
+        if not text:
+            logging.warning("字幕内容为空")
+            return
+
+        # 清空之前的文本
+        self.follow_text.delete('1.0', 'end')
+
+        logging.info(f"显示字幕: {text}")
+        self.follow_text.insert('1.0', text)
+
+        # # 显示时间信息
+        # self.follow_text.insert('end',
+        #                         f"时间: {self.format_time(subtitle['start_time'], is_milliseconds=True)} -> "
+        #                         f"{self.format_time(subtitle['end_time'], is_milliseconds=True)}\n\n",
+        #                         'time')
+        #
+        # # 显示英文
+        # if subtitle.get('en_text'):
+        #     self.follow_text.insert('end', subtitle['en_text'] + '\n', 'en')
+        #
+        # # 显示中文
+        # if subtitle.get('cn_text'):
         messagebox.showerror("错误", f"程序启动失败: {str(e)}", icon='error')
         root.destroy()
 
 
 if __name__ == "__main__":
     main()
-

@@ -1,0 +1,92 @@
+1
+00:00:01,280 --> 00:00:03,020
+Listen 59.
+
+2
+00:00:03,480 --> 00:00:05,120
+Is that all?
+
+3
+00:00:06,179 --> 00:00:09,520
+Listen to the tape, then answer this question.
+
+4
+00:00:11,300 --> 00:00:14,160
+Does the lady buy any chalk?
+
+5
+00:00:16,480 --> 00:00:18,480
+I want some envelopes, please.
+
+6
+00:00:19,519 --> 00:00:23,120
+Do you want the large size or the small size?
+
+7
+00:00:23,320 --> 00:00:24,940
+The large size, please.
+
+8
+00:00:26,179 --> 00:00:27,619
+Do you have any writing paper?
+
+9
+00:00:27,719 --> 00:00:29,980
+Yes, we do.
+
+10
+00:00:32,600 --> 00:00:34,399
+I don't have any small pads.
+
+11
+00:00:34,899 --> 00:00:37,239
+I only have large ones.
+
+12
+00:00:38,359 --> 00:00:39,500
+Do you want a pad?
+
+13
+00:00:39,920 --> 00:00:40,899
+Yes, please.
+
+14
+00:00:41,719 --> 00:00:43,679
+And I want some glue.
+
+15
+00:00:44,619 --> 00:00:45,859
+A bottle of glue.
+
+16
+00:00:46,820 --> 00:00:50,739
+And I want a large box of chalk, too.
+
+17
+00:00:51,679 --> 00:00:53,859
+I only have small boxes.
+
+18
+00:00:54,399 --> 00:00:55,459
+Do you want one?
+
+19
+00:00:56,000 --> 00:00:57,699
+No, thank you.
+
+20
+00:00:57,799 --> 00:00:58,939
+Is that all?
+
+21
+00:00:59,420 --> 00:01:00,959
+That's all, thank you.
+
+22
+00:01:01,740 --> 00:01:03,039
+What else do you want?
+
+23
+00:01:03,219 --> 00:01:05,039
+I want my change.
+

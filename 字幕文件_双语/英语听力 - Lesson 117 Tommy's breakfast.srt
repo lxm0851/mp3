@@ -1,0 +1,65 @@
+1
+00:00:07,159 --> 00:00:11,200
+英文：Listen to the tape, then answer this question.
+中文：听录音，然后回答问题。
+
+2
+00:00:13,019 --> 00:00:17,120
+英文：What does she mean by change in the last sentence?
+中文：她最后一句话的变化是什么意思？
+
+3
+00:00:19,219 --> 00:00:25,539
+英文：When my husband was going into the dining room this morning, he dropped some coins on the floor.
+中文：今天早上，当我丈夫走进餐厅时，他把一些硬币掉在了地板上。
+
+4
+00:00:26,280 --> 00:00:28,600
+英文：There were coins everywhere.
+中文：到处都是硬币。
+
+5
+00:00:29,280 --> 00:00:33,079
+英文：We looked for them, but we could not find them all.
+中文：我们找了他们，但没能全部找到。
+
+6
+00:00:34,439 --> 00:00:42,320
+英文：While we were having breakfast, our little boy, Tommy, found two small coins on the floor.
+中文：当我们吃早餐时，我们的小男孩汤米在地板上发现了两枚小硬币。
+
+7
+00:00:43,179 --> 00:00:45,599
+英文：He put them both into his mouth.
+中文：他把它们都放进嘴里。
+
+8
+00:00:46,510 --> 00:00:50,519
+英文：We both tried to get the coins, but it was too late.
+中文：我们都试图拿到硬币，但为时已晚。
+
+9
+00:00:51,039 --> 00:00:53,739
+英文：Tommy had already swallowed them.
+中文：汤米已经把它们吞下去了。
+
+10
+00:00:55,380 --> 00:01:00,939
+英文：Later that morning, when I was doing the housework, my husband phoned me from the office.
+中文：那天早上晚些时候，当我正在做家务时，我丈夫从办公室给我打电话。
+
+11
+00:01:02,140 --> 00:01:04,120
+英文：«How's Tommy?» he asked.
+中文：“汤米怎么样？”他问。
+
+12
+00:01:04,560 --> 00:01:06,959
+英文：«I don't know», I answered.
+中文：“我不知道”，我回答。
+
+13
+00:01:07,640 --> 00:01:13,759
+英文：Tommy's been to the toilet three times this morning, but I haven't had any change yet.
+中文：汤米今天早上上了三次厕所，但我还没有零钱。
+
