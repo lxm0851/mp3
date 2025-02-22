@@ -4241,7 +4241,7 @@ class AudioPlayer:
             # 创建编辑窗口
             edit_window = tk.Toplevel(self.root)
             edit_window.title(f"字幕编辑 - {os.path.basename(current_file)}")
-            edit_window.geometry("800x600")
+            edit_window.geometry("800x900")
 
             # 保存当前状态
             was_playing = self.is_playing
@@ -4285,14 +4285,34 @@ class AudioPlayer:
             # 配置初始状态为只读
             edit_text.config(state='disabled')
 
-            def find_text():
-                """查找文本"""
+            # 搜索匹配项列表和当前匹配索引
+            matches = []
+            current_match_index = -1
+
+            def check_edit_mode():
+                print('弹窗1')
+                """检查是否处于编辑模式"""
+                if edit_text['state'] == 'disabled':
+                    logging.info("尝试在非编辑模式下操作，弹出提示窗口")
+                    print('弹窗2')
+                    edit_window.grab_set()  # 确保编辑窗口获得焦点
+                    edit_window.focus_force()  # 强制聚焦
+                    messagebox.showinfo("提示", "请先点击‘编辑’按钮进入编辑模式", parent=edit_window)
+                    return False
+                return True
+
+            def find_text(direction='next'):
+                """查找文本，支持查找下一个和上一个"""
+                if not check_edit_mode():
+                    return
+
                 edit_text.tag_remove('search', '1.0', 'end')
                 search_text = search_var.get()
                 if not search_text:
                     search_result_label.config(text="请输入搜索内容")
                     return
 
+                nonlocal matches, current_match_index
                 matches = []
                 pos = '1.0'
                 while True:
@@ -4300,26 +4320,70 @@ class AudioPlayer:
                     if not pos:
                         break
                     end_pos = f"{pos}+{len(search_text)}c"
-                    edit_text.tag_add('search', pos, end_pos)
                     matches.append((pos, end_pos))
                     pos = end_pos
 
                 edit_text.tag_config('search', background='yellow')
-                if matches:
-                    edit_text.see(matches[0][0])  # 跳转到第一个匹配项
-                    search_result_label.config(text=f"找到 {len(matches)} 个匹配项")
-                else:
+                if not matches:
                     search_result_label.config(text="未找到匹配项")
+                    current_match_index = -1
+                    return
 
-            def replace_text():
-                """替换文本"""
+                # 根据方向更新当前匹配索引
+                if direction == 'next':
+                    current_match_index = (current_match_index + 1) % len(matches)
+                elif direction == 'prev':
+                    current_match_index = (current_match_index - 1) % len(matches)
+
+                current_pos, current_end_pos = matches[current_match_index]
+                edit_text.tag_add('search', current_pos, current_end_pos)
+                edit_text.see(current_pos)
+                search_result_label.config(text=f"匹配项 {current_match_index + 1}/{len(matches)}")
+
+            def find_next():
+                """查找下一个匹配项"""
+                find_text(direction='next')
+
+            def find_prev():
+                """查找上一个匹配项"""
+                find_text(direction='prev')
+
+            def replace_single():
+                """替换当前匹配项"""
+                if not check_edit_mode():
+                    return
+
                 search_text = search_var.get()
                 replace_text = replace_var.get()
                 if not search_text:
                     search_result_label.config(text="请输入搜索内容")
                     return
 
-                if not edit_text.tag_ranges('search'):
+                nonlocal matches, current_match_index
+                if not matches or current_match_index < 0:
+                    search_result_label.config(text="请先查找内容")
+                    return
+
+                current_pos, current_end_pos = matches[current_match_index]
+                edit_text.delete(current_pos, current_end_pos)
+                edit_text.insert(current_pos, replace_text)
+                edit_text.tag_remove('search', '1.0', 'end')
+                find_text(direction='next')  # 重新查找并高亮
+                search_result_label.config(text="已替换当前匹配项")
+
+            def replace_all():
+                """替换所有匹配项"""
+                if not check_edit_mode():
+                    return
+
+                search_text = search_var.get()
+                replace_text = replace_var.get()
+                if not search_text:
+                    search_result_label.config(text="请输入搜索内容")
+                    return
+
+                nonlocal matches, current_match_index
+                if not matches:
                     search_result_label.config(text="请先查找内容")
                     return
 
@@ -4329,8 +4393,10 @@ class AudioPlayer:
                     edit_text.delete('1.0', 'end')
                     edit_text.insert('1.0', new_content)
                     edit_text.tag_remove('search', '1.0', 'end')
-                    find_text()  # 重新高亮搜索结果
-                    search_result_label.config(text="替换完成")
+                    matches = []
+                    current_match_index = -1
+                    find_text()  # 重新查找并高亮
+                    search_result_label.config(text="已替换所有匹配项")
 
             def validate_subtitles():
                 """验证字幕格式"""
@@ -4377,6 +4443,10 @@ class AudioPlayer:
             def start_editing():
                 """开始编辑"""
                 # 暂停播放
+                nonlocal current_pos, current_segment
+                current_pos = self.current_position  # 保存当前播放位置
+                current_segment = self.current_segment if was_following else None  # 保存当前段落位置
+
                 if was_following:
                     self.pause_follow_reading()  # 暂停跟读模式
                     logging.info("跟读模式已暂停")
@@ -4393,12 +4463,17 @@ class AudioPlayer:
                 save_btn.config(state='normal')
                 cancel_btn.config(state='normal')
                 format_btn.config(state='normal')
-                find_btn.config(state='normal')
-                replace_btn.config(state='normal')
+                find_next_btn.config(state='normal')
+                find_prev_btn.config(state='normal')
+                replace_single_btn.config(state='normal')
+                replace_all_btn.config(state='normal')
                 logging.info("开始编辑字幕")
 
             def format_subtitles():
                 """格式化字幕"""
+                if not check_edit_mode():
+                    return
+
                 if messagebox.askyesno("确认格式化", "格式化将调整时间格式和文本，是否继续？"):
                     content = edit_text.get('1.0', 'end').strip()
                     blocks = content.split('\n\n')
@@ -4419,6 +4494,9 @@ class AudioPlayer:
 
             def save_changes():
                 """保存更改"""
+                if not check_edit_mode():
+                    return
+
                 try:
                     content = edit_text.get('1.0', 'end').strip()
 
@@ -4510,13 +4588,18 @@ class AudioPlayer:
             format_btn = ttk.Button(btn_frame, text="格式化", command=format_subtitles, state='disabled')
             format_btn.pack(side='left', padx=5)
 
-            find_btn = ttk.Button(search_frame, text="查找", command=find_text, state='disabled')
-            find_btn.pack(side='left', padx=2)
+            find_next_btn = ttk.Button(search_frame, text="查找下一个", command=find_next, state='disabled')
+            find_next_btn.pack(side='left', padx=2)
 
-            replace_btn = ttk.Button(search_frame, text="替换", command=replace_text, state='disabled')
-            replace_btn.pack(side='left', padx=2)
+            find_prev_btn = ttk.Button(search_frame, text="查找上一个", command=find_prev, state='disabled')
+            find_prev_btn.pack(side='left', padx=2)
 
-            # 加载字幕内容并高亮当前段落
+            replace_single_btn = ttk.Button(search_frame, text="替换", command=replace_single, state='disabled')
+            replace_single_btn.pack(side='left', padx=2)
+
+            replace_all_btn = ttk.Button(search_frame, text="全部替换", command=replace_all, state='disabled')
+            replace_all_btn.pack(side='left', padx=2)
+
             # 加载字幕内容并高亮当前段落
             try:
                 with open(srt_path, 'r', encoding='utf-8') as f:
@@ -4527,7 +4610,6 @@ class AudioPlayer:
 
                 # 高亮当前段落或播放位置
                 edit_text.tag_configure('current', background='lightblue')
-
                 def find_text_range(start_ms, end_ms):
                     """根据时间范围找到对应的文本行号和字符位置"""
                     try:
@@ -4594,7 +4676,6 @@ class AudioPlayer:
                                 logging.error(f"高亮普通模式播放位置失败: {e}")
                         else:
                             logging.warning(f"无法高亮普通模式的当前播放位置: {current_pos}秒")
-
             except UnicodeDecodeError as e:
                 self.update_status(f"字幕文件编码错误: {str(e)}", 'error')
                 logging.error(f"字幕文件编码错误: {e}")
@@ -4618,9 +4699,16 @@ class AudioPlayer:
             edit_window.protocol("WM_DELETE_WINDOW", on_closing)
 
             # 绑定快捷键
-            edit_window.bind('<Control-f>', lambda e: find_text() if find_btn['state'] == 'normal' else None)
-            edit_window.bind('<Control-h>', lambda e: replace_text() if replace_btn['state'] == 'normal' else None)
-            edit_window.bind('<Control-s>', lambda e: save_changes() if save_btn['state'] == 'normal' else None)
+            edit_window.bind('<Control-f>',
+                             lambda e: find_next() if find_next_btn['state'] == 'normal' else check_edit_mode())
+            edit_window.bind('<Control-Shift-F>',
+                             lambda e: find_prev() if find_prev_btn['state'] == 'normal' else check_edit_mode())
+            edit_window.bind('<Control-h>', lambda e: replace_single() if replace_single_btn[
+                                                                              'state'] == 'normal' else check_edit_mode())
+            edit_window.bind('<Control-Shift-H>',
+                             lambda e: replace_all() if replace_all_btn['state'] == 'normal' else check_edit_mode())
+            edit_window.bind('<Control-s>',
+                             lambda e: save_changes() if save_btn['state'] == 'normal' else check_edit_mode())
             edit_window.bind('<Escape>', lambda e: cancel_editing() if cancel_btn['state'] == 'normal' else None)
             edit_window.bind('<Control-z>', lambda e: edit_text.edit_undo() if edit_text['state'] == 'normal' else None)
             edit_window.bind('<Control-y>', lambda e: edit_text.edit_redo() if edit_text['state'] == 'normal' else None)

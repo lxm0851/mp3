@@ -55,8 +55,8 @@ class WhisperSubtitleGenerator:
                 'sign': sign
             }
 
-            print(f"翻译请求参数 - app_id: {repr(self.app_id)}, key:{ self.app_key}, salt: {salt}")
-            print(f"翻译请求签名: {sign}")
+            # print(f"翻译请求参数 - app_id: {repr(self.app_id)}, key:{ self.app_key}, salt: {salt}")
+            # print(f"翻译请求签名: {sign}")
 
             # 发送请求
             response = requests.post(self.api_url, headers=headers, data=payload)
@@ -113,8 +113,8 @@ class WhisperSubtitleGenerator:
             'sign': sign
         }
 
-        print(f"翻译请求参数 - app_id: {repr(self.app_id)}, salt: {salt}")
-        print(f"翻译请求签名: {sign}")
+        # print(f"翻译请求参数 - app_id: {repr(self.app_id)}, salt: {salt}")
+        # print(f"翻译请求签名: {sign}")
 
         try:
             response = requests.get(self.api_url, params=params)

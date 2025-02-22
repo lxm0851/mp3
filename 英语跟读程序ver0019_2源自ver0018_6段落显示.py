@@ -847,21 +847,25 @@ class WhisperFollowReading:
 
     def recognize_speech(self, audio_file):
         """改进的语音识别功能"""
+        # print('准备识别录音0', audio_file)
+        # time.sleep(60000)
         try:
             # 检查停止标志
             if self._stop_recognition:
                 logging.info("语音识别已停止，不执行")
+                # print('准备识别录音1：', self._stop_recognition)
                 return None
 
             if not os.path.exists(audio_file):
                 logging.error(f"音频文件不存在: {audio_file}")
+                # print('准备识别录音2：', os.path.exists(audio_file))
                 return None
 
-            if os.path.getsize(audio_file) < 1024:
-                logging.warning("音频文件过小")
-                return None
+            # if os.path.getsize(audio_file) < 1024:
+            #     logging.warning("音频文件过小")
+            #     return None
 
-            print('开始WhisperFollowReading内的语音识别')
+            # print('开始WhisperFollowReading内的语音识别')
             # 使用 Whisper 进行识别，移除可能导致tensor维度不匹配的参数
             result = self.whisper_model.transcribe(
                 audio_file,
@@ -880,16 +884,11 @@ class WhisperFollowReading:
 
         except Exception as e:
             logging.error(f"语音识别错误: {e}")
+            # print('语音识别错误：', e)
             return None
 
     def start_recording(self):
         """改进的录音功能"""
-        if hasattr(self, 'no_recording_mode') and self.no_recording_mode:
-            logging.info("不录音模式，跳过录音")
-            self.is_recording = False
-            self.frames = []
-            return
-
         self.is_recording = True
         self.frames = []
         self.last_audio_time = time.time()
@@ -901,7 +900,7 @@ class WhisperFollowReading:
                 p = pyaudio.PyAudio()
                 stream = p.open(
                     format=pyaudio.paInt16,
-                    channels=2,
+                    channels=1,  # 使用双通道会验证出错
                     rate=self.sample_rate,
                     input=True,
                     frames_per_buffer=4096
@@ -968,55 +967,6 @@ class WhisperFollowReading:
                     os.remove(file)
             except Exception as e:
                 logging.warning(f"清理临时文件失败: {e}")
-
-    def get_audio_data(self):
-        """获取录音数据"""
-        return self.frames if self.frames else None
-
-    def recognize_audio(self, audio_data):
-        """识别录音数据"""
-        try:
-            if not audio_data:
-                logging.warning("没有录音数据可识别")
-                return ""
-
-            playback_file, transcribe_file = self.save_audio_files()
-            if not transcribe_file:
-                logging.error("无法保存录音文件")
-                return ""
-
-            result = self.recognize_speech(transcribe_file)
-            if result and 'en_text' in result:
-                return result['en_text']
-            else:
-                logging.warning("识别结果为空")
-                return ""
-        except Exception as e:
-            logging.error(f"识别录音失败: {e}")
-            return ""
-
-    def play_recording(self, audio_data):
-        """播放录音数据"""
-        try:
-            if not audio_data:
-                logging.warning("没有录音数据可播放")
-                return
-
-            playback_file, _ = self.save_audio_files()
-            if not playback_file:
-                logging.error("无法保存录音文件")
-                return
-
-            pygame.mixer.music.load(playback_file)
-            pygame.mixer.music.play()
-            while pygame.mixer.music.get_busy():
-                time.sleep(0.1)
-        except Exception as e:
-            logging.error(f"播放录音失败: {e}")
-        finally:
-            pygame.mixer.music.stop()
-            pygame.mixer.music.unload()
-            self.cleanup_temp_files()
 
     def __del__(self):
         """析构函数中确保清理临时文件"""
@@ -1743,33 +1693,34 @@ class AudioPlayer:
         except Exception as e:
             self.update_status(f"显示统计信息失败: {str(e)}", 'error')
 
-    def check_follow_status(self, wait_time):
+    def check_follow_status(self, original_wait_time):
         """检查跟读状态"""
-        try:
-            if not self.is_following:
+        if not self.is_following:
+            return
+
+        current_time = time.time()
+        if (current_time - self.follow_reader.last_audio_time >= self.follow_reader.silence_threshold or
+                current_time - self.follow_reader.last_audio_time >= original_wait_time / 1000):
+
+            # 如果没有检测到语音输入且已经过了最短等待时间
+            if not self.follow_reader.frames and current_time - self.follow_reader.last_audio_time >= self.follow_reader.min_wait_time:
+                self.follow_text.insert('end', "\n未检测到语音输入，继续下一段\n", 'warning')
+                self.continue_after_playback()
                 return
 
-            self.follow_reader.stop_recording()
-            audio_data = self.follow_reader.get_audio_data()
-            if audio_data:
-                recognized_text = self.follow_reader.recognize_audio(audio_data)
-                self.follow_text.insert('end', f"\n识别结果: {recognized_text}\n", 'result')
-                self.follow_text.see('end')
+            # 处理录音
+            self.process_follow_reading()
+        else:
+            # 继续等待
+            self.root.after(100, lambda: self.check_follow_status(original_wait_time))
 
-                if hasattr(self, 'no_playback_mode') and self.no_playback_mode:
-                    self.follow_text.insert('end', "\n不播放录音模式，跳过播放...\n", 'prompt')
-                    self.follow_text.see('end')
-                else:
-                    self.follow_reader.play_recording(audio_data)
-                    self.follow_text.insert('end', "\n正在播放录音...\n", 'prompt')
-                    self.follow_text.see('end')
-
+    def _continue_after_no_record_mode(self):
+        """不录音模式下等待时间结束后的处理逻辑"""
+        try:
             self.toggle_navigation_buttons(True)
             self.continue_after_playback()
-
         except Exception as e:
-            logging.error(f"检查跟读状态失败: {e}")
-            self.update_status("检查跟读状态失败", 'error')
+            logging.error(f"不录音模式继续播放失败: {e}")
             self.toggle_navigation_buttons(True)
             self.continue_after_playback()
 
@@ -3529,20 +3480,27 @@ class AudioPlayer:
 
                 self.toggle_navigation_buttons(False)
 
-                if hasattr(self, 'no_recording_mode') and self.no_recording_mode:
+                if hasattr(self, 'no_record_mode') and self.no_record_mode:
                     self.follow_text.insert('end', "\n不录音模式，跳过录音...\n", 'prompt')
                     self.follow_text.see('end')
-                    self.toggle_navigation_buttons(True)
-                    self.continue_after_playback()
+                    wait_time = max(
+                        3000,
+                        min(5000, int((current_subtitle['end_time'] - current_subtitle['start_time']) * 1.0))
+                    )
+                    # time.sleep(wait_time) time.sleep() 是一个阻塞调用，它会暂停整个线程的执行。在 GUI 程序（如使用 Tkinter）中，主线程负责处理界面更新和事件循环。调用 time.sleep() 会导致界面卡死，无法响应用户操作，直到 time.sleep() 结束。
+                    # 使用 after() 替代 time.sleep()
+                    logging.info(f"不录音模式，等待时间: {wait_time}ms")
+                    self.root.after(wait_time, self._continue_after_no_record_mode)
                     return
                 else:
                     self.follow_text.insert('end', "\n请开始跟读...\n", 'prompt')
                     self.follow_text.see('end')
+                    self.follow_reader._stop_recognition = False
                     self.follow_reader.start_recording()
 
                     wait_time = max(
                         3000,
-                        min(8000, int((current_subtitle['end_time'] - current_subtitle['start_time']) * 1.0))
+                        min(5000, int((current_subtitle['end_time'] - current_subtitle['start_time']) * 1.0))
                     )
 
                     self.root.after(wait_time, lambda: self.check_follow_status(wait_time))
@@ -4116,6 +4074,8 @@ class AudioPlayer:
             self.is_playing = True
             logging.info(f"从 {self.format_time(self.current_position)} 开始播放")
 
+            self.toggle_navigation_buttons(False)
+
             # 加载字幕
             self.load_subtitles(current_file)
 
@@ -4242,7 +4202,7 @@ class AudioPlayer:
             self.root.after(1000, self._resume_progress_update)
 
     def edit_current_subtitles(self):
-        """改进的字幕编辑功能"""
+        """改进的字幕编辑功能，增加滚动条和编辑控制"""
         try:
             if not self.current_playlist or self.current_index >= len(self.current_playlist):
                 self.update_status("无可编辑的字幕文件", 'warning')
@@ -4260,65 +4220,115 @@ class AudioPlayer:
                 self.update_status("没有字幕文件的写入权限", 'error')
                 return
 
-            # 暂停播放
-            was_playing = self.is_playing
-            if was_playing:
-                self.play_pause()
-
             # 创建编辑窗口
             edit_window = tk.Toplevel(self.root)
             edit_window.title("字幕编辑")
             edit_window.geometry("800x600")
 
+            # 创建主框架
+            main_frame = ttk.Frame(edit_window)
+            main_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+            # 创建文本编辑区和滚动条
+            text_frame = ttk.Frame(main_frame)
+            text_frame.pack(fill=tk.BOTH, expand=True)
+
+            # 创建滚动条
+            y_scrollbar = ttk.Scrollbar(text_frame)
+            y_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
             # 创建文本编辑区
-            edit_text = tk.Text(edit_window, wrap=tk.WORD)
-            edit_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+            edit_text = tk.Text(text_frame, wrap=tk.WORD, yscrollcommand=y_scrollbar.set)
+            edit_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            y_scrollbar.config(command=edit_text.yview)
+
+            # 配置初始状态为只读
+            edit_text.config(state='disabled')
 
             # 加载字幕内容
             try:
                 with open(srt_path, 'r', encoding='utf-8') as f:
                     content = f.read()
+                    edit_text.config(state='normal')
                     edit_text.insert('1.0', content)
+                    edit_text.config(state='disabled')
             except Exception as e:
                 self.update_status(f"读取字幕文件失败: {str(e)}", 'error')
                 edit_window.destroy()
                 return
 
-            def save_subtitles():
+            # 记录原始状态
+            was_playing = self.is_playing
+            was_following = self.is_following
+
+            def start_editing():
+                """开始编辑"""
+                # 暂停当前播放
+                if was_following:
+                    self.pause_follow_reading()
+                elif was_playing:
+                    self.play_pause()
+
+                # 启用编辑
+                edit_text.config(state='normal')
+                edit_btn.config(state='disabled')
+                save_btn.config(state='normal')
+                cancel_btn.config(state='normal')
+
+            def save_changes():
+                """保存更改"""
                 try:
                     content = edit_text.get('1.0', tk.END)
 
-                    # 创建备份文件
+                    # 创建备份
                     backup_path = srt_path + '.bak'
                     try:
-                        import shutil
                         shutil.copy2(srt_path, backup_path)
                     except Exception as e:
-                        logging.warning(f"创建备份文件失败: {e}")
+                        logging.warning(f"创建备份失败: {e}")
 
                     # 保存新内容
                     with open(srt_path, 'w', encoding='utf-8') as f:
                         f.write(content)
 
-                    self.update_status("字幕保存成功", 'success')
-
                     # 重新加载字幕
                     self.load_subtitles(current_file)
 
+                    # 恢复播放状态
+                    if was_following:
+                        self.start_follow_reading()  # 调用跟读开始处理
+                    elif was_playing:
+                        self.play_current_track()
+
+                    edit_window.destroy()
+                    self.update_status("字幕保存成功", 'success')
+
+                except Exception as e:
+                    self.update_status(f"保存失败: {str(e)}", 'error')
+
+            def cancel_editing():
+                """取消编辑"""
+                if messagebox.askyesno("确认", "确定要放弃更改吗？"):
+                    # 恢复播放状态
+                    if was_following:
+                        self.start_follow_reading()  # 调用跟读开始处理
+                    elif was_playing:
+                        self.play_current_track()
                     edit_window.destroy()
 
-                except PermissionError:
-                    self.update_status("保存失败：没有写入权限", 'error')
-                except Exception as e:
-                    self.update_status(f"保存字幕文件失败: {str(e)}", 'error')
-
-            # 添加保存按钮
-            btn_frame = ttk.Frame(edit_window)
+            # 创建按钮框架
+            btn_frame = ttk.Frame(main_frame)
             btn_frame.pack(fill='x', pady=5)
 
-            ttk.Button(btn_frame, text="保存", command=save_subtitles).pack(side='left', padx=5)
-            ttk.Button(btn_frame, text="取消",
-                       command=edit_window.destroy).pack(side='left', padx=5)
+            # 创建按钮
+            edit_btn = ttk.Button(btn_frame, text="编辑", command=start_editing)
+            edit_btn.pack(side='left', padx=5)
+
+            save_btn = ttk.Button(btn_frame, text="保存", command=save_changes, state='disabled')
+            save_btn.pack(side='left', padx=5)
+
+            cancel_btn = ttk.Button(btn_frame, text="取消", command=cancel_editing, state='disabled')
+            cancel_btn.pack(side='left', padx=5)
 
         except Exception as e:
             self.update_status(f"打开字幕编辑器失败: {str(e)}", 'error')
@@ -4421,6 +4431,7 @@ class AudioPlayer:
         state = "normal" if enable else "disabled"
         for btn in [self.prev_segment_btn, self.next_segment_btn, self.repeat_segment_btn]:
             btn.config(state=state)
+        self.root.update()  # 强制更新界面
 
     def toggle_recording_mode(self):
         """切换录音模式，并处理互斥逻辑"""

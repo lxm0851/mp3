@@ -519,7 +519,8 @@ class SubtitleGeneratorWindow:
                 self.audio_path_var.set(path)
                 self.update_progress_text(f"已选择音频文件夹: {path}")
             if not self.output_path_var.get():
-                self.output_path_var.set(os.path.join(path, "字幕文件"))
+                # self.output_path_var.set(os.path.join(path, "字幕文件"))
+                self.output_path_var.set(path)
 
     def select_output_path(self):
         path = filedialog.askdirectory(title="选择输出文件夹")
@@ -948,6 +949,8 @@ class WhisperFollowReading:
             self.has_moved = False
             if self.recording_thread:
                 self.recording_thread.join(timeout=1.0)
+                if self.recording_thread.is_alive():
+                    logging.warning("录音线程未正常结束")
                 self.recording_thread = None
 
             return self.frames
@@ -956,6 +959,7 @@ class WhisperFollowReading:
             return []
         finally:
             self.is_recording = False
+            self.is_playing = False  # 确保播放状态重置
             if not self.frames:
                 self.frames = []
 
@@ -1045,6 +1049,11 @@ class AudioPlayer:
 
         self._recognition_thread = None  # 识别线程引用
         self._last_switch_time = time.time()
+
+        # 新增文本编辑相关变量
+        self.audio_play_count = 0
+        self.temp_text_file = os.path.join(self.temp_dir, 'temp_text.txt')
+        self.create_text_editor()
 
     @property
     def volume(self):
@@ -1172,6 +1181,7 @@ class AudioPlayer:
             self.no_playback_mode = False
             self.no_record_var = tk.BooleanVar(value=False)
             self.no_playback_var = tk.BooleanVar(value=False)
+            self.is_editing_recovery = False
 
             # 字幕相关变量
             self.subtitles = []
@@ -1291,6 +1301,7 @@ class AudioPlayer:
             tools_menu = tk.Menu(menubar, tearoff=0)
             menubar.add_cascade(label="工具", menu=tools_menu)
             tools_menu.add_command(label="字幕生成", command=self.show_subtitle_generator)  # 新增
+            tools_menu.add_command(label="文本编辑", command=self.show_text_editor)  # 新增文本编辑器入口
             tools_menu.add_command(label="跟读模式", command=self.toggle_follow_reading)
             tools_menu.add_command(label="清理缓存", command=self.clean_cache)
             tools_menu.add_command(label="查看统计", command=self.show_stats)
@@ -1307,6 +1318,11 @@ class AudioPlayer:
     def show_subtitle_generator(self):
         """显示字幕生成窗口"""
         SubtitleGeneratorWindow(self.root)
+
+    def show_text_editor(self):
+        """显示文本编辑窗口"""
+        if not hasattr(self, 'text_editor_window') or not self.text_editor_window.winfo_exists():
+            self.text_editor_window = TextEditorWindow(self.root, self)
 
     def create_widgets(self):
         """创建界面组件"""
@@ -2742,38 +2758,48 @@ class AudioPlayer:
     def handle_playback_ended(self):
         """改进的播放结束处理"""
         try:
-            print("进入 handle_playback_ended")  # 调试输出
+            logging.info("进入 handle_playback_ended")
+            # 如果是从编辑模式恢复，禁用自动下一曲逻辑，继续播放当前曲目
+            if getattr(self, 'is_editing_recovery', False):
+                logging.info("编辑模式恢复，禁用自动下一曲逻辑，继续播放当前曲目")
+                self.current_position = max(0, self.current_position)
+                total_length = self.get_current_audio_length()
+                if total_length > 0:
+                    self.current_position = min(self.current_position, total_length)
+                logging.info(f"编辑模式恢复，当前曲目继续播放，位置: {self.current_position}秒")
+                self.play_current_track()
+                return
+
             # 如果正在跟读模式
             if self.is_following:
                 if self.current_segment >= self.total_segments:
                     self.current_loop += 1
                     if self.current_loop < self.loop_count.get():
-                        # 继续当前文件的下一轮跟读
                         self.current_segment = 0
                         self.follow_text.insert('end', f"\n重新跟读第 {self.current_loop + 1} 次\n")
                         self.play_segment()
                     else:
-                        # 切换到下一个文件或结束跟读
                         if self.current_index < len(self.current_playlist) - 1:
                             self.current_index += 1
                             self.current_loop = 0
                             self.current_segment = 0
+                            self.current_position = 0
                             self.start_follow_reading()
                         else:
                             self.stop_follow_reading()
-                            # 恢复普通播放模式
                             self.current_index = 0
                             self.current_loop = 0
+                            self.current_position = 0
                             self.play_current_track()
                 return
 
             # 普通模式处理
             max_loops = self.loop_count.get()
-            print('普通模式单次播放完成:', self.current_loop, max_loops)
+            logging.info(f"普通模式单次播放完成: 当前循环={self.current_loop}, 最大循环={max_loops}")
 
             current_file = os.path.basename(self.current_playlist[self.current_index])
             if self.current_loop < max_loops - 1:
-                print(f"继续循环播放当前曲目，下一循环={self.current_loop + 1}")  # 调试输出
+                logging.info(f"继续循环播放当前曲目，下一循环={self.current_loop + 1}")
                 self.current_loop += 1
                 pygame.mixer.music.load(self.current_playlist[self.current_index])
                 pygame.mixer.music.play()
@@ -2781,26 +2807,39 @@ class AudioPlayer:
                 self.check_playback_status()
                 return
 
-            # 当前曲目已循环完毕，重置循环计数，根据播放模式播放下一曲
+            # 当前曲目已循环完毕，重置循环计数
             self.current_loop = 0
             play_mode = self.mode_var.get()
-            print(f"播放模式: {play_mode}")  # 调试输出
+            logging.info(f"播放模式: {play_mode}")
+
+            # 增加播放计数
+            self.audio_play_count += 1
+
+            # 每播放3个音频后，播放编辑器文本
+            if self.audio_play_count >= 2:
+                self.audio_play_count = 0
+                # self.play_editor_text()  # 取消
 
             if play_mode == "sequential":
                 if self.current_index < len(self.current_playlist) - 1:
-                    self.next_track()  # 播放下一曲
+                    self.current_index += 1
+                    self.current_position = 0
+                    self.play_current_track()
                 else:
-                    self.stop()  # 停止播放
+                    self.stop()
             elif play_mode == "loop_one":
-                self.play_current_track()  # 循环播放当前曲目
+                self.current_position = 0
+                self.play_current_track()
             elif play_mode == "loop_all":
                 if self.current_index < len(self.current_playlist) - 1:
-                    self.next_track()  # 播放下一曲
+                    self.current_index += 1
                 else:
-                    # 列表循环，回到列表开头
                     self.current_index = 0
-                    self.next_track()
+                self.current_position = 0
+                self.play_current_track()
+
         except Exception as e:
+            logging.error(f"处理播放结束失败: {e}")
             self.update_status(f"处理播放结束失败: {str(e)}", 'error')
 
     def start_playback_delay(self):
@@ -4068,7 +4107,17 @@ class AudioPlayer:
     def play_current_track(self):
         """播放当前曲目"""
         try:
+            if not self.current_playlist or self.current_index < 0 or self.current_index >= len(self.current_playlist):
+                logging.error("播放列表或索引无效")
+                self.update_status("播放失败: 播放列表或索引无效", 'error')
+                return
+
             current_file = self.current_playlist[self.current_index]
+            logging.info(f"加载音频文件: {current_file}")
+
+            pygame.mixer.music.stop()
+            pygame.mixer.music.unload()
+
             pygame.mixer.music.load(current_file)
             pygame.mixer.music.play(start=self.current_position)
             self.is_playing = True
@@ -4076,12 +4125,9 @@ class AudioPlayer:
 
             self.toggle_navigation_buttons(False)
 
-            # 加载字幕
             self.load_subtitles(current_file)
-
-            # 启动字幕更新（将秒转换为毫秒）
             if self.subtitles:
-                current_pos_ms = self.current_position * 1000  # 转换为毫秒
+                current_pos_ms = self.current_position * 1000
                 subtitle = self._find_subtitle_optimized(current_pos_ms)
                 if subtitle:
                     self._update_subtitle_display(subtitle)
@@ -4098,17 +4144,20 @@ class AudioPlayer:
 
             total_length = self.get_current_audio_length()
             if total_length > 0:
+                self.current_position = min(self.current_position, total_length)
                 progress = (self.current_position / total_length) * 100
                 self.progress_scale.set(progress)
             self.time_label.config(text=f"{self.format_time(self.current_position)} / {self.format_time(total_length)}")
 
             if not self.is_seeking:
                 self.update_timer = self.root.after(500, self.update_progress)
-            self.root.after(1000, lambda: self._start_playback_check())
+            self._check_timer = self.root.after(1000, lambda: self._start_playback_check())
             logging.info(f"播放开始，当前进度: {self.current_position} 秒")
 
         except Exception as e:
+            logging.error(f"播放失败: {e}")
             self.update_status(f"播放失败: {str(e)}", 'error')
+            self.is_playing = False
 
     def update_progress(self):
         """更新进度条和时间显示"""
@@ -4241,7 +4290,7 @@ class AudioPlayer:
             # 创建编辑窗口
             edit_window = tk.Toplevel(self.root)
             edit_window.title(f"字幕编辑 - {os.path.basename(current_file)}")
-            edit_window.geometry("800x600")
+            edit_window.geometry("800x900")
 
             # 保存当前状态
             was_playing = self.is_playing
@@ -4285,14 +4334,34 @@ class AudioPlayer:
             # 配置初始状态为只读
             edit_text.config(state='disabled')
 
-            def find_text():
-                """查找文本"""
+            # 搜索匹配项列表和当前匹配索引
+            matches = []
+            current_match_index = -1
+
+            def check_edit_mode():
+                print('弹窗1')
+                """检查是否处于编辑模式"""
+                if edit_text['state'] == 'disabled':
+                    logging.info("尝试在非编辑模式下操作，弹出提示窗口")
+                    print('弹窗2')
+                    edit_window.grab_set()  # 确保编辑窗口获得焦点
+                    edit_window.focus_force()  # 强制聚焦
+                    messagebox.showinfo("提示", "请先点击‘编辑’按钮进入编辑模式", parent=edit_window)
+                    return False
+                return True
+
+            def find_text(direction='next'):
+                """查找文本，支持查找下一个和上一个"""
+                if not check_edit_mode():
+                    return
+
                 edit_text.tag_remove('search', '1.0', 'end')
                 search_text = search_var.get()
                 if not search_text:
                     search_result_label.config(text="请输入搜索内容")
                     return
 
+                nonlocal matches, current_match_index
                 matches = []
                 pos = '1.0'
                 while True:
@@ -4300,26 +4369,70 @@ class AudioPlayer:
                     if not pos:
                         break
                     end_pos = f"{pos}+{len(search_text)}c"
-                    edit_text.tag_add('search', pos, end_pos)
                     matches.append((pos, end_pos))
                     pos = end_pos
 
                 edit_text.tag_config('search', background='yellow')
-                if matches:
-                    edit_text.see(matches[0][0])  # 跳转到第一个匹配项
-                    search_result_label.config(text=f"找到 {len(matches)} 个匹配项")
-                else:
+                if not matches:
                     search_result_label.config(text="未找到匹配项")
+                    current_match_index = -1
+                    return
 
-            def replace_text():
-                """替换文本"""
+                # 根据方向更新当前匹配索引
+                if direction == 'next':
+                    current_match_index = (current_match_index + 1) % len(matches)
+                elif direction == 'prev':
+                    current_match_index = (current_match_index - 1) % len(matches)
+
+                current_pos, current_end_pos = matches[current_match_index]
+                edit_text.tag_add('search', current_pos, current_end_pos)
+                edit_text.see(current_pos)
+                search_result_label.config(text=f"匹配项 {current_match_index + 1}/{len(matches)}")
+
+            def find_next():
+                """查找下一个匹配项"""
+                find_text(direction='next')
+
+            def find_prev():
+                """查找上一个匹配项"""
+                find_text(direction='prev')
+
+            def replace_single():
+                """替换当前匹配项"""
+                if not check_edit_mode():
+                    return
+
                 search_text = search_var.get()
                 replace_text = replace_var.get()
                 if not search_text:
                     search_result_label.config(text="请输入搜索内容")
                     return
 
-                if not edit_text.tag_ranges('search'):
+                nonlocal matches, current_match_index
+                if not matches and current_match_index < 0:
+                    search_result_label.config(text="请先查找内容")
+                    return
+
+                current_pos, current_end_pos = matches[current_match_index]
+                edit_text.delete(current_pos, current_end_pos)
+                edit_text.insert(current_pos, replace_text)
+                edit_text.tag_remove('search', '1.0', 'end')
+                find_text(direction='next')  # 重新查找并高亮
+                search_result_label.config(text="已替换当前匹配项")
+
+            def replace_all():
+                """替换所有匹配项"""
+                if not check_edit_mode():
+                    return
+
+                search_text = search_var.get()
+                replace_text = replace_var.get()
+                if not search_text:
+                    search_result_label.config(text="请输入搜索内容")
+                    return
+
+                nonlocal matches, current_match_index
+                if not matches:
                     search_result_label.config(text="请先查找内容")
                     return
 
@@ -4329,8 +4442,10 @@ class AudioPlayer:
                     edit_text.delete('1.0', 'end')
                     edit_text.insert('1.0', new_content)
                     edit_text.tag_remove('search', '1.0', 'end')
-                    find_text()  # 重新高亮搜索结果
-                    search_result_label.config(text="替换完成")
+                    matches = []
+                    current_match_index = -1
+                    find_text()  # 重新查找并高亮
+                    search_result_label.config(text="已替换所有匹配项")
 
             def validate_subtitles():
                 """验证字幕格式"""
@@ -4376,11 +4491,15 @@ class AudioPlayer:
 
             def start_editing():
                 """开始编辑"""
-                # 暂停播放
+                nonlocal current_pos, current_segment
+                current_pos = self.current_position
+                current_segment = self.current_segment if was_following else None
+
+                # 确保所有播放模式都暂停
                 if was_following:
-                    self.pause_follow_reading()  # 暂停跟读模式
+                    self.pause_follow_reading()
                     logging.info("跟读模式已暂停")
-                elif was_playing:
+                if was_playing or self.is_playing:  # 增加状态检查
                     pygame.mixer.music.pause()
                     self.is_playing = False
                     if hasattr(self, 'update_timer') and self.update_timer:
@@ -4393,12 +4512,17 @@ class AudioPlayer:
                 save_btn.config(state='normal')
                 cancel_btn.config(state='normal')
                 format_btn.config(state='normal')
-                find_btn.config(state='normal')
-                replace_btn.config(state='normal')
+                find_next_btn.config(state='normal')
+                find_prev_btn.config(state='normal')
+                replace_single_btn.config(state='normal')
+                replace_all_btn.config(state='normal')
                 logging.info("开始编辑字幕")
 
             def format_subtitles():
                 """格式化字幕"""
+                if not check_edit_mode():
+                    return
+
                 if messagebox.askyesno("确认格式化", "格式化将调整时间格式和文本，是否继续？"):
                     content = edit_text.get('1.0', 'end').strip()
                     blocks = content.split('\n\n')
@@ -4419,6 +4543,9 @@ class AudioPlayer:
 
             def save_changes():
                 """保存更改"""
+                if not check_edit_mode():
+                    return
+
                 try:
                     content = edit_text.get('1.0', 'end').strip()
 
@@ -4456,9 +4583,18 @@ class AudioPlayer:
                         logging.info(f"恢复跟读模式，当前段落: {self.current_segment}")
                     elif was_playing:
                         self.is_playing = True
-                        self.current_position = current_pos
+                        self.current_position = max(0, current_pos)
+                        total_length = self.get_current_audio_length()
+                        if total_length > 0:
+                            self.current_position = min(self.current_position, total_length)
+                        self.current_loop = min(self.current_loop, self.loop_count.get() - 1)
+                        logging.info(
+                            f"恢复普通播放模式，当前位置: {self.current_position}秒，当前循环: {self.current_loop}/{self.loop_count.get()}")
+                        pygame.mixer.music.stop()
+                        self.is_editing_recovery = True
+                        # 强制继续播放当前曲目，禁用自动下一曲逻辑
                         self.play_current_track()
-                        logging.info(f"恢复普通播放模式，当前位置: {self.current_position}秒")
+                        self.is_editing_recovery = False
 
                     edit_window.destroy()
                     self.update_status("字幕保存成功", 'success')
@@ -4475,23 +4611,38 @@ class AudioPlayer:
 
             def cancel_editing():
                 """取消编辑"""
-                if edit_text.edit_modified():  # 检查是否有未保存的更改
-                    if not messagebox.askyesno("确认", "有未保存的更改，确定要放弃吗？"):
-                        return
-                edit_window.destroy()
-                logging.info("取消字幕编辑")
+                try:
+                    # 检查是否有未保存的更改
+                    if edit_text.edit_modified():
+                        if not messagebox.askyesno("确认", "有未保存的更改，确定要放弃吗？"):
+                            return
+                    edit_window.destroy()
+                    logging.info("取消字幕编辑")
 
-                # 恢复播放状态
-                if was_following:
-                    self.is_following = True
-                    self.current_segment = current_segment if current_segment is not None else 0
-                    self.play_segment()
-                    logging.info(f"恢复跟读模式，当前段落: {self.current_segment}")
-                elif was_playing:
-                    self.is_playing = True
-                    self.current_position = current_pos
-                    self.play_current_track()
-                    logging.info(f"恢复普通播放模式，当前位置: {self.current_position}秒")
+                    # 恢复播放状态
+                    if was_following:
+                        self.is_following = True
+                        self.current_segment = current_segment if current_segment is not None else 0
+                        self.play_segment()
+                        logging.info(f"恢复跟读模式，当前段落: {self.current_segment}")
+                    elif was_playing:
+                        self.is_playing = True
+                        self.current_position = max(0, current_pos)
+                        total_length = self.get_current_audio_length()
+                        if total_length > 0:
+                            self.current_position = min(self.current_position, total_length)
+                        self.current_loop = min(self.current_loop, self.loop_count.get() - 1)
+                        logging.info(
+                            f"恢复普通播放模式，当前位置: {self.current_position}秒，当前循环: {self.current_loop}/{self.loop_count.get()}")
+                        pygame.mixer.music.stop()
+                        self.is_editing_recovery = True
+                        # 强制继续播放当前曲目，禁用自动下一曲逻辑
+                        self.play_current_track()
+                        self.is_editing_recovery = False
+
+                except Exception as e:
+                    logging.error(f"取消编辑失败: {e}")
+                    self.update_status(f"取消编辑失败: {str(e)}", 'error')
 
             # 创建按钮框架
             btn_frame = ttk.Frame(main_frame)
@@ -4510,13 +4661,18 @@ class AudioPlayer:
             format_btn = ttk.Button(btn_frame, text="格式化", command=format_subtitles, state='disabled')
             format_btn.pack(side='left', padx=5)
 
-            find_btn = ttk.Button(search_frame, text="查找", command=find_text, state='disabled')
-            find_btn.pack(side='left', padx=2)
+            find_next_btn = ttk.Button(search_frame, text="查找下一个", command=find_next, state='disabled')
+            find_next_btn.pack(side='left', padx=2)
 
-            replace_btn = ttk.Button(search_frame, text="替换", command=replace_text, state='disabled')
-            replace_btn.pack(side='left', padx=2)
+            find_prev_btn = ttk.Button(search_frame, text="查找上一个", command=find_prev, state='disabled')
+            find_prev_btn.pack(side='left', padx=2)
 
-            # 加载字幕内容并高亮当前段落
+            replace_single_btn = ttk.Button(search_frame, text="替换", command=replace_single, state='disabled')
+            replace_single_btn.pack(side='left', padx=2)
+
+            replace_all_btn = ttk.Button(search_frame, text="全部替换", command=replace_all, state='disabled')
+            replace_all_btn.pack(side='left', padx=2)
+
             # 加载字幕内容并高亮当前段落
             try:
                 with open(srt_path, 'r', encoding='utf-8') as f:
@@ -4527,7 +4683,6 @@ class AudioPlayer:
 
                 # 高亮当前段落或播放位置
                 edit_text.tag_configure('current', background='lightblue')
-
                 def find_text_range(start_ms, end_ms):
                     """根据时间范围找到对应的文本行号和字符位置"""
                     try:
@@ -4594,7 +4749,6 @@ class AudioPlayer:
                                 logging.error(f"高亮普通模式播放位置失败: {e}")
                         else:
                             logging.warning(f"无法高亮普通模式的当前播放位置: {current_pos}秒")
-
             except UnicodeDecodeError as e:
                 self.update_status(f"字幕文件编码错误: {str(e)}", 'error')
                 logging.error(f"字幕文件编码错误: {e}")
@@ -4618,9 +4772,16 @@ class AudioPlayer:
             edit_window.protocol("WM_DELETE_WINDOW", on_closing)
 
             # 绑定快捷键
-            edit_window.bind('<Control-f>', lambda e: find_text() if find_btn['state'] == 'normal' else None)
-            edit_window.bind('<Control-h>', lambda e: replace_text() if replace_btn['state'] == 'normal' else None)
-            edit_window.bind('<Control-s>', lambda e: save_changes() if save_btn['state'] == 'normal' else None)
+            edit_window.bind('<Control-f>',
+                             lambda e: find_next() if find_next_btn['state'] == 'normal' else check_edit_mode())
+            edit_window.bind('<Control-Shift-F>',
+                             lambda e: find_prev() if find_prev_btn['state'] == 'normal' else check_edit_mode())
+            edit_window.bind('<Control-h>', lambda e: replace_single() if replace_single_btn[
+                                                                              'state'] == 'normal' else check_edit_mode())
+            edit_window.bind('<Control-Shift-H>',
+                             lambda e: replace_all() if replace_all_btn['state'] == 'normal' else check_edit_mode())
+            edit_window.bind('<Control-s>',
+                             lambda e: save_changes() if save_btn['state'] == 'normal' else check_edit_mode())
             edit_window.bind('<Escape>', lambda e: cancel_editing() if cancel_btn['state'] == 'normal' else None)
             edit_window.bind('<Control-z>', lambda e: edit_text.edit_undo() if edit_text['state'] == 'normal' else None)
             edit_window.bind('<Control-y>', lambda e: edit_text.edit_redo() if edit_text['state'] == 'normal' else None)
@@ -4658,7 +4819,10 @@ class AudioPlayer:
         if self.is_following:
             self.follow_reader.stop_recording()
             self.is_following = False
+            self.is_playing = False  # 确保普通播放状态也重置
+            pygame.mixer.music.pause()  # 确保音频暂停
             self.follow_button.config(text="继续跟读")
+            logging.info("跟读模式已暂停，所有播放状态已重置")
 
     def resume_follow_reading(self):
         """继续跟读"""
@@ -5170,6 +5334,122 @@ class AudioPlayer:
                 self.load_subtitles(current_file)
         except Exception as e:
             logging.error(f"加载字幕失败: {e}")
+
+    def create_text_editor(self):
+        """创建文本编辑区域"""
+        # 创建文本编辑框架
+        text_edit_frame = ttk.LabelFrame(self.control_frame, text="文本编辑")
+        text_edit_frame.pack(fill="x", pady=5)
+
+        # 创建文本编辑区
+        self.text_editor = tk.Text(text_edit_frame, height=3, width=40)
+        self.text_editor.pack(pady=5, padx=5, fill="x")
+
+        # 创建保存按钮
+        save_btn = ttk.Button(text_edit_frame, text="保存", command=self.save_editor_text)
+        save_btn.pack(side="right", padx=5, pady=2)
+
+        # 加载已保存的文本
+        self.load_editor_text()
+
+    def save_editor_text(self):
+        """保存编辑器文本到临时文件"""
+        try:
+            text = self.text_editor.get("1.0", "end-1c")
+            with open(self.temp_text_file, 'w', encoding='utf-8') as f:
+                f.write(text)
+            self.update_status("文本已保存", 'success')
+        except Exception as e:
+            self.update_status(f"保存文本失败: {str(e)}", 'error')
+
+    def load_editor_text(self):
+        """从临时文件加载文本到编辑器"""
+        try:
+            if os.path.exists(self.temp_text_file):
+                with open(self.temp_text_file, 'r', encoding='utf-8') as f:
+                    text = f.read()
+                self.text_editor.delete("1.0", "end")
+                self.text_editor.insert("1.0", text)
+        except Exception as e:
+            self.update_status(f"加载文本失败: {str(e)}", 'error')
+
+    def play_editor_text(self):
+        """播放编辑器中的文本"""
+        text = self.text_editor.get("1.0", "end-1c")
+        if len(text.strip()) >= 4:
+            pygame.mixer.music.stop()
+            self.is_playing = False
+            time.sleep(0.5)  # 等待当前音频停止
+            
+            # 使用系统TTS播放文本
+            import pyttsx3
+            engine = pyttsx3.init()
+            engine.say(text)
+            engine.runAndWait()
+            
+            # 恢复原音频播放
+            if self.current_playlist:
+                self.play_current_track()
+
+
+class TextEditorWindow:
+    def __init__(self, parent, player):
+        self.window = tk.Toplevel(parent)
+        self.window.title("文本编辑器")
+        self.window.geometry("600x400")
+        self.player = player
+        
+        # 创建文本编辑区
+        self.text_frame = ttk.Frame(self.window)
+        self.text_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        # 文本编辑区
+        self.text_editor = tk.Text(self.text_frame, wrap=tk.WORD)
+        self.text_editor.pack(fill="both", expand=True)
+        
+        # 按钮区域
+        btn_frame = ttk.Frame(self.window)
+        btn_frame.pack(fill="x", padx=10, pady=5)
+        
+        ttk.Button(btn_frame, text="保存", command=self.save_text).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="清空", command=self.clear_text).pack(side="left", padx=5)
+        
+        # 加载已保存的文本
+        self.load_text()
+        
+        # 绑定关闭事件
+        self.window.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
+    def save_text(self):
+        """保存文本内容"""
+        try:
+            text = self.text_editor.get("1.0", "end-1c")
+            with open(self.player.temp_text_file, 'w', encoding='utf-8') as f:
+                f.write(text)
+            messagebox.showinfo("成功", "文本已保存")
+        except Exception as e:
+            messagebox.showerror("错误", f"保存失败: {str(e)}")
+    
+    def load_text(self):
+        """加载已保存的文本"""
+        try:
+            if os.path.exists(self.player.temp_text_file):
+                with open(self.player.temp_text_file, 'r', encoding='utf-8') as f:
+                    text = f.read()
+                self.text_editor.delete("1.0", "end")
+                self.text_editor.insert("1.0", text)
+        except Exception as e:
+            messagebox.showerror("错误", f"加载文本失败: {str(e)}")
+    
+    def clear_text(self):
+        """清空文本"""
+        if messagebox.askyesno("确认", "确定要清空文本吗?"):
+            self.text_editor.delete("1.0", "end")
+    
+    def on_closing(self):
+        """关闭窗口前保存内容"""
+        self.save_text()
+        self.window.destroy()
 
 
 def main():
