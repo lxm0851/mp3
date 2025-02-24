@@ -29,6 +29,8 @@ from text_to_subtitle_ver0010 import WhisperSubtitleGenerator
 
 import shutil
 from collections import deque
+# 使用系统TTS播放文本
+import pyttsx3
 
 
 def safe_call(func):
@@ -981,7 +983,7 @@ class AudioPlayer:
     def __init__(self, root):
         self.root = root
         self.root.title("音频播放器")
-        self.root.geometry("1000x800")
+        self.root.geometry("1000x1000")
 
         # 音频引擎初始化
         pygame.mixer.pre_init(44100, -16, 2, 4096)  # 增加缓冲区大小
@@ -1049,6 +1051,11 @@ class AudioPlayer:
 
         self._recognition_thread = None  # 识别线程引用
         self._last_switch_time = time.time()
+
+        # 新增文本编辑相关变量
+        self.audio_play_count = 0
+        self.temp_text_file = os.path.join(self.temp_dir, 'temp_text.txt')
+        self.create_text_editor()
 
     @property
     def volume(self):
@@ -1177,6 +1184,7 @@ class AudioPlayer:
             self.no_record_var = tk.BooleanVar(value=False)
             self.no_playback_var = tk.BooleanVar(value=False)
             self.is_editing_recovery = False
+            self.is_editing = False
 
             # 字幕相关变量
             self.subtitles = []
@@ -1248,6 +1256,9 @@ class AudioPlayer:
 
             self.is_playing_or_recording = False  # 是否正在播放句子、录音或播放录音
             self.has_moved = False  # 是否已经执行过切换操作
+            self.last_sentence_read = False
+            self.selected_file = None
+            self.paused_position = None
 
         except Exception as e:
             print(f"初始化变量失败: {e}")
@@ -1296,6 +1307,7 @@ class AudioPlayer:
             tools_menu = tk.Menu(menubar, tearoff=0)
             menubar.add_cascade(label="工具", menu=tools_menu)
             tools_menu.add_command(label="字幕生成", command=self.show_subtitle_generator)  # 新增
+            tools_menu.add_command(label="文本编辑", command=self.show_text_editor)  # 新增文本编辑器入口
             tools_menu.add_command(label="跟读模式", command=self.toggle_follow_reading)
             tools_menu.add_command(label="清理缓存", command=self.clean_cache)
             tools_menu.add_command(label="查看统计", command=self.show_stats)
@@ -1312,6 +1324,11 @@ class AudioPlayer:
     def show_subtitle_generator(self):
         """显示字幕生成窗口"""
         SubtitleGeneratorWindow(self.root)
+
+    def show_text_editor(self):
+        """显示文本编辑窗口"""
+        if not hasattr(self, 'text_editor_window') or not self.text_editor_window.winfo_exists():
+            self.text_editor_window = TextEditorWindow(self.root, self)
 
     def create_widgets(self):
         """创建界面组件"""
@@ -1465,19 +1482,7 @@ class AudioPlayer:
                         value="loop_all").pack(side="left")
 
         # 播放控制
-        control_buttons = ttk.Frame(self.control_frame)  # 修复：使用 self.control_frame
-        control_buttons.pack(fill="x", pady=5)
-
-        self.play_button = ttk.Button(control_buttons, text="播放",
-                                      command=self.play_pause)
-        self.play_button.pack(side="left", padx=5)
-
-        ttk.Button(control_buttons, text="上一曲",
-                   command=self.previous_track).pack(side="left", padx=5)
-        ttk.Button(control_buttons, text="下一曲",
-                   command=self.next_track).pack(side="left", padx=5)
-        ttk.Button(control_buttons, text="停止",
-                   command=self.stop).pack(side="left", padx=5)
+        self.create_control_buttons()
 
         # 音量控制 - 直接设置初始值
         volume_frame = ttk.LabelFrame(self.control_frame, text="音量控制")  # 修复：使用 self.control_frame
@@ -1715,6 +1720,7 @@ class AudioPlayer:
 
             # 处理录音
             self.process_follow_reading()
+
         else:
             # 继续等待
             self.root.after(100, lambda: self.check_follow_status(original_wait_time))
@@ -1723,10 +1729,12 @@ class AudioPlayer:
         """不录音模式下等待时间结束后的处理逻辑"""
         try:
             self.toggle_navigation_buttons(True)
+            self.toggle_play_button(enable=True)
             self.continue_after_playback()
         except Exception as e:
             logging.error(f"不录音模式继续播放失败: {e}")
             self.toggle_navigation_buttons(True)
+            self.toggle_play_button(enable=True)
             self.continue_after_playback()
 
     def show_shortcuts(self):
@@ -1769,7 +1777,6 @@ class AudioPlayer:
         try:
             # 1. 停止录音并获取数据
             frames = self.follow_reader.stop_recording()
-            self.toggle_navigation_buttons(True)  # 录音结束，启用导航按钮
 
             if not frames:
                 logging.warning("没有录音数据")
@@ -1818,6 +1825,7 @@ class AudioPlayer:
         except Exception as e:
             logging.error(f"处理录音失败: {e}")
             self.toggle_navigation_buttons(True)  # 确保在出错时也启用导航按钮
+            self.toggle_play_button(enable=True)
             self.continue_after_playback()
 
     def _update_recognition_result(self, recognition, reference_text, playback_file, transcribe_file):
@@ -1919,14 +1927,18 @@ class AudioPlayer:
             logging.error(f"继续播放失败: {e}")
             self.update_status("继续播放失败", 'error')
 
-    def stop_follow_reading(self):
+    def stop_follow_reading(self, resume_normal_playback=False):
         """改进的停止跟读功能"""
-        if not self.is_following:  # 避免重复调用
-            return
+        # if not self.is_following:  # 避免重复调用
+        #     return
 
         try:
             self.is_following = False
             self.follow_button.config(text="开始跟读")
+
+            # 启用播放/暂停按钮和导航按钮（在播放时允许操作）
+            self.toggle_play_button(enable=True)
+            self.toggle_navigation_buttons(enable=True)
 
             # 清理音频资源前先停止所有播放
             pygame.mixer.music.stop()
@@ -1944,12 +1956,33 @@ class AudioPlayer:
             self.has_moved = False
             self._retry_count = 0
             self.current_segment = 0
+            self.paused_segment = None
+            logging.info("停止跟读，清理所有状态")
 
+            # 重置界面
+            self.play_button.config(text="播放")
+            self.progress_scale.set(0)
+            self.time_label.config(text="00:00 / 00:00")
             self.follow_text.insert('end', "跟读已停止\n")
             self.follow_text.see('end')
 
-            # 延迟后再启动普通播放
-            self.root.after(500, self._resume_normal_playback)
+            # 取消进度更新定时器
+            if hasattr(self, 'update_timer') and self.update_timer:
+                self.root.after_cancel(self.update_timer)
+                self.update_timer = None
+
+            # 如果需要恢复普通播放模式
+            if resume_normal_playback and self.current_playlist:
+                self.current_position = 0  # 从头开始播放
+                self.paused_file = None
+                self.paused_position = None
+                self.play_current_track()
+                logging.info("停止跟读后，恢复普通播放模式")
+            else:
+                self.current_position = 0
+                self.paused_file = None
+                self.paused_position = None
+                logging.info("停止跟读，不恢复普通播放模式")
 
             self.update_status("跟读已停止", 'info')
 
@@ -2001,7 +2034,7 @@ class AudioPlayer:
 
                 # 启动进度更新
                 if not self.is_seeking:
-                    self.update_timer = self.root.after(500, self.update_progress)
+                    self.update_timer = self.root.after(600, self.update_progress)
 
             except Exception as e:
                 logging.error(f"加载音频失败: {e}")
@@ -2575,11 +2608,15 @@ class AudioPlayer:
 
             # 显示英文
             if subtitle.get('en_text'):
-                self.follow_text.insert('end', subtitle['en_text'] + '\n', 'en')
+                # 确保英文文本末尾有换行符
+                en_text = subtitle['en_text'].rstrip() + '\n\n'  # 移除末尾多余空格并添加换行
+                self.follow_text.insert('end', en_text, 'en')
 
             # 显示中文
             if subtitle.get('cn_text'):
-                self.follow_text.insert('end', subtitle['cn_text'] + '\n', 'cn')
+                # 确保中文文本末尾有换行符
+                cn_text = subtitle['cn_text'].rstrip() + '\n\n'  # 移除末尾多余空格并添加换行
+                self.follow_text.insert('end', cn_text, 'cn')
 
             # 确保显示最新内容
             self.follow_text.see('end')
@@ -2587,29 +2624,49 @@ class AudioPlayer:
             print(f"显示字幕失败: {e}")
 
     def expand_folder(self, folder_id):
-        """改进的展开文件夹功能"""
+        """展开文件夹"""
         try:
-            # 清除现有子节点
+            if folder_id not in self.folders:
+                logging.warning(f"无效的文件夹ID: {folder_id}")
+                return
+
+            folder_info = self.folders[folder_id]
+            folder_info['expanded'] = True
+
+            # 清空现有子节点
             for child in self.folder_tree.get_children(folder_id):
                 self.folder_tree.delete(child)
 
-            # 按自然顺序添加文件
-            for file_path in self.folders[folder_id]['files']:
+            # 添加文件节点
+            for file_path in folder_info['files']:
                 file_name = os.path.basename(file_path)
                 duration = self.get_audio_duration(file_path)
-                self.folder_tree.insert(folder_id, "end", text=file_name,
-                                        values=(duration,))
+                self.folder_tree.insert(folder_id, "end", text=file_name, values=(file_path, duration))
+                logging.debug(f"添加文件节点: {file_name}, 路径: {file_path}, 时长: {duration}")
 
-            self.folders[folder_id]['expanded'] = True
-
+            self.save_settings()
+            logging.info(f"已展开文件夹: {self.folder_tree.item(folder_id)['text']}")
         except Exception as e:
-            self.update_status(f"展开文件夹失败: {str(e)}", 'error')
+            logging.error(f"展开文件夹失败: {e}", exc_info=True)
 
     def collapse_folder(self, folder_id):
         """收起文件夹"""
-        for child in self.folder_tree.get_children(folder_id):
-            self.folder_tree.delete(child)
-        self.folders[folder_id]['expanded'] = False
+        try:
+            if folder_id not in self.folders:
+                logging.warning(f"无效的文件夹ID: {folder_id}")
+                return
+
+            folder_info = self.folders[folder_id]
+            folder_info['expanded'] = False
+
+            # 清空子节点
+            for child in self.folder_tree.get_children(folder_id):
+                self.folder_tree.delete(child)
+
+            self.save_settings()
+            logging.info(f"已收起文件夹: {self.folder_tree.item(folder_id)['text']}")
+        except Exception as e:
+            logging.error(f"收起文件夹失败: {e}", exc_info=True)
 
     def get_audio_duration(self, file_path):
         """获取音频文件时长"""
@@ -2625,18 +2682,70 @@ class AudioPlayer:
 
     def play_audio_file(self, item):
         """播放选中的音频文件"""
-        parent = self.folder_tree.parent(item)
-        if parent and parent in self.folders:
-            file_name = self.folder_tree.item(item)['text']
-            folder_files = self.folders[parent]['files']
+        try:
+            logging.info(f"双击播放音频文件: {item}")
+            parent = self.folder_tree.parent(item)
+            if parent and parent in self.folders:
+                file_name = self.folder_tree.item(item)['text']
+                values = self.folder_tree.item(item).get('values', [])
+                logging.debug(f"文件节点值: {values}")
 
-            # 查找对应的文件路径
-            for file_path in folder_files:
-                if os.path.basename(file_path) == file_name:
-                    self.current_playlist = folder_files
-                    self.current_index = folder_files.index(file_path)
-                    self.play_current_track()
-                    break
+                if values and len(values) > 0:
+                    file_path = values[0]
+                    # 规范化文件路径
+                    file_path = os.path.normpath(os.path.abspath(file_path))
+                    logging.debug(f"规范化文件路径: {file_path}")
+
+                    if not os.path.exists(file_path):
+                        logging.warning(f"文件路径不存在: {file_path}")
+                        self.update_status(f"文件不存在: {file_name}", 'warning')
+                        return
+
+                    folder_files = self.folders[parent]['files']
+                    # 规范化文件夹中的文件路径
+                    normalized_folder_files = [os.path.normpath(os.path.abspath(f)) for f in folder_files]
+                    logging.debug(f"文件夹文件列表: {normalized_folder_files}")
+
+                    if file_path in normalized_folder_files:
+                        logging.info(f"找到音频文件路径: {file_path}")
+                        # 检查是否是当前正在播放的文件
+                        if (self.current_playlist and
+                                self.current_index < len(self.current_playlist) and
+                                self.current_playlist[self.current_index] == file_path and
+                                pygame.mixer.music.get_busy()):
+                            logging.info(f"当前文件已在播放，忽略重复请求: {file_path}")
+                            self.update_status(f"文件已在播放: {file_name}", 'info')
+                            return
+
+                        # 停止当前播放（如果有）
+                        if pygame.mixer.music.get_busy():
+                            pygame.mixer.music.stop()
+                            pygame.mixer.music.unload()
+                            logging.info("已停止当前播放")
+
+                        # 播放新文件
+                        self.current_playlist = normalized_folder_files
+                        self.current_index = normalized_folder_files.index(file_path)
+                        self.current_loop = 0
+                        self.current_position = 0  # 只有在新播放时才重置位置
+                        self.paused_file = None  # 清理暂停状态
+                        self.paused_position = None
+                        self.selected_file = file_path  # 更新选中文件
+                        self.play_current_track()
+                        self.update_status(f"开始播放: {file_name}", 'success')
+                    else:
+                        logging.warning(f"文件路径不在文件夹中: {file_path}")
+                        self.update_status("选中的文件不在文件夹中", 'warning')
+                else:
+                    logging.warning(f"文件节点缺少路径信息: {item}, 文件名: {file_name}")
+                    self.update_status(f"文件路径不可用: {file_name}", 'warning')
+            else:
+                logging.warning(f"无效的文件节点或父文件夹: {item}")
+                self.update_status("无法找到文件所属文件夹", 'warning')
+
+        except Exception as e:
+            logging.error(f"播放音频文件失败: {e}", exc_info=True)
+            self.update_status(f"播放失败: {str(e)}", 'error')
 
     def get_current_audio_length(self):
         """获取当前音频文件的总长度"""
@@ -2705,7 +2814,12 @@ class AudioPlayer:
                     cn_text = []
 
                     for line in remaining_lines:
-                        if line.startswith('英文：'):
+                        # 移除所有可能的提示词
+                        if line.startswith('英文字幕：'):
+                            en_text.append(line.replace('英文字幕：', '').strip())
+                        elif line.startswith('中文字幕：'):
+                            cn_text.append(line.replace('中文字幕：', '').strip())
+                        elif line.startswith('英文：'):
                             en_text.append(line.replace('英文：', '').strip())
                         elif line.startswith('中文：'):
                             cn_text.append(line.replace('中文：', '').strip())
@@ -2748,6 +2862,8 @@ class AudioPlayer:
         """改进的播放结束处理"""
         try:
             logging.info("进入 handle_playback_ended")
+            # 使用 self.last_sentence_read 控制，每个文件只朗读一次
+
             # 如果是从编辑模式恢复，禁用自动下一曲逻辑，继续播放当前曲目
             if getattr(self, 'is_editing_recovery', False):
                 logging.info("编辑模式恢复，禁用自动下一曲逻辑，继续播放当前曲目")
@@ -2763,6 +2879,10 @@ class AudioPlayer:
             if self.is_following:
                 if self.current_segment >= self.total_segments:
                     self.current_loop += 1
+                    # 每播放3个音频后，播放编辑器文本
+                    # if self.audio_play_count >= 2:
+                    #     self.audio_play_count = 0
+                    #     self.play_editor_text()  # 取消
                     if self.current_loop < self.loop_count.get():
                         self.current_segment = 0
                         self.follow_text.insert('end', f"\n重新跟读第 {self.current_loop + 1} 次\n")
@@ -2780,19 +2900,37 @@ class AudioPlayer:
                             self.current_loop = 0
                             self.current_position = 0
                             self.play_current_track()
+                else:
+                    # 当前段落未结束，可能是意外中断，尝试继续播放当前段落
+                    logging.info("跟读模式下，当前段落未结束，尝试继续播放")
+                    self.play_segment()
                 return
 
             # 普通模式处理
+            total_length = self.get_current_audio_length()
             max_loops = self.loop_count.get()
             logging.info(f"普通模式单次播放完成: 当前循环={self.current_loop}, 最大循环={max_loops}")
 
             current_file = os.path.basename(self.current_playlist[self.current_index])
             if self.current_loop < max_loops - 1:
-                logging.info(f"继续循环播放当前曲目，下一循环={self.current_loop + 1}")
+                # 循环播放当前曲目
                 self.current_loop += 1
+                self.current_position = 0
+                self._playback['last_position'] = 0
+                self.last_update_time = time.time()
+                self.last_seek_position = 0  # 重置跳转位置
                 pygame.mixer.music.load(self.current_playlist[self.current_index])
                 pygame.mixer.music.play()
+                self.is_playing = True  # 明确设置播放状态
                 self.info_label.config(text=f"当前播放: {current_file} ({self.current_loop + 1}/{max_loops})")
+                self.progress_scale.set(0)  # 重置进度条
+                self.time_label.config(text=f"{self.format_time(0)} / {self.format_time(total_length)}")
+                logging.info(f"普通模式下，继续循环播放当前曲目，下一循环={self.current_loop + 1}")
+
+                # 取消现有的进度更新定时器并启动新的进度更新
+                if hasattr(self, 'update_timer') and self.update_timer:
+                    self.root.after_cancel(self.update_timer)
+                self.update_timer = self.root.after(600, self.update_progress)
                 self.check_playback_status()
                 return
 
@@ -2801,15 +2939,39 @@ class AudioPlayer:
             play_mode = self.mode_var.get()
             logging.info(f"播放模式: {play_mode}")
 
+            # 增加播放计数
+            self.audio_play_count += 1
+
+            # 每播放3个音频后，播放编辑器文本
+            if self.audio_play_count >= 2:
+                self.audio_play_count = 0
+                # self.play_editor_text()  # 取消
+            # else:
+            #     if not hasattr(self, 'last_sentence_read'):
+            #         self.last_sentence_read = False
+            #
+            #     if not self.last_sentence_read and self.subtitles:
+            #         self.read_last_chinese_sentence()
+            #         self.last_sentence_read = True
+
             if play_mode == "sequential":
                 if self.current_index < len(self.current_playlist) - 1:
                     self.current_index += 1
                     self.current_position = 0
+                    self.progress_scale.set(0)  # 重置进度条
+                    self.time_label.config(text=f"{self.format_time(0)} / {self.format_time(total_length)}")
+                    logging.info("普通模式下，顺序播放，播放下一曲")
                     self.play_current_track()
                 else:
                     self.stop()
+                    self.progress_scale.set(0)  # 重置进度条
+                    self.time_label.config(text=f"{self.format_time(0)} / {self.format_time(total_length)}")
+                    logging.info("普通模式下，播放列表结束，停止播放")
             elif play_mode == "loop_one":
                 self.current_position = 0
+                self.progress_scale.set(0)  # 重置进度条
+                self.time_label.config(text=f"{self.format_time(0)} / {self.format_time(total_length)}")
+                logging.info("普通模式下，单曲无限循环，重新播放当前曲目")
                 self.play_current_track()
             elif play_mode == "loop_all":
                 if self.current_index < len(self.current_playlist) - 1:
@@ -2817,11 +2979,16 @@ class AudioPlayer:
                 else:
                     self.current_index = 0
                 self.current_position = 0
+                self.progress_scale.set(0)  # 重置进度条
+                self.time_label.config(text=f"{self.format_time(0)} / {self.format_time(total_length)}")
+                logging.info("普通模式下，列表循环，播放下一曲或重新开始")
                 self.play_current_track()
 
         except Exception as e:
             logging.error(f"处理播放结束失败: {e}")
             self.update_status(f"处理播放结束失败: {str(e)}", 'error')
+            self.progress_scale.set(0)  # 确保异常时进度条重置
+            self.time_label.config(text=f"{self.format_time(0)} / {self.format_time(total_length)}")
 
     def start_playback_delay(self):
         """启动播放延迟"""
@@ -3055,7 +3222,7 @@ class AudioPlayer:
 
                 # 启动进度更新
                 if not self.is_seeking:
-                    self.update_timer = self.root.after(500, self.update_progress)
+                    self.update_timer = self.root.after(600, self.update_progress)
 
         except Exception as e:
             logging.error(f"设置播放速度失败: {e}")
@@ -3397,7 +3564,7 @@ class AudioPlayer:
                 self.start_follow_reading()  # 调用跟读开始处理
                 self.update_status("跟读模式已开启", 'info')
             else:
-                self.stop_follow_reading()
+                self.stop_follow_reading(resume_normal_playback=True)  # 停止跟读后恢复普通播放
         except Exception as e:
             self.update_status(f"切换跟读失败: {str(e)}", 'error')
 
@@ -3499,6 +3666,7 @@ class AudioPlayer:
                 self.follow_text.see('end')
 
                 self.toggle_navigation_buttons(False)
+                self.toggle_play_button(enable=False)
 
                 if hasattr(self, 'no_record_mode') and self.no_record_mode:
                     self.follow_text.insert('end', "\n不录音模式，跳过录音...\n", 'prompt')
@@ -3528,6 +3696,7 @@ class AudioPlayer:
             except Exception as e:
                 logging.error(f"准备跟读失败: {e}")
                 self.toggle_navigation_buttons(True)
+                self.toggle_play_button(enable=True)
                 self.continue_after_playback()
 
     def on_tree_double_click(self, event):
@@ -3552,21 +3721,56 @@ class AudioPlayer:
     def on_tree_single_click(self, event):
         """处理树形视图的单击事件"""
         try:
+            logging.debug("处理树形视图单击事件开始")
+
+            # 获取当前选中项
             selection = self.folder_tree.selection()
+            logging.debug(f"当前选中项: {selection}")
+
             if selection:
                 item = selection[0]
+                logging.debug(f"选中节点: {item}, 节点信息: {self.folder_tree.item(item)}")
+
                 # 更新信息标签
                 if item in self.folders:
                     # 文件夹节点
                     folder_name = self.folder_tree.item(item)['text']
                     file_count = len(self.folders[item]['files'])
                     self.info_label.config(text=f"文件夹: {folder_name} ({file_count}个文件)")
+                    logging.info(f"用户选中文件夹: {folder_name}, 文件数量: {file_count}")
                 else:
                     # 文件节点
                     file_name = self.folder_tree.item(item)['text']
-                    self.info_label.config(text=f"选中文件: {file_name}")
+                    values = self.folder_tree.item(item).get('values', [])
+                    logging.debug(f"文件节点值: {values}")
+
+                    if values and len(values) > 0:
+                        file_path = values[0]
+                        # 规范化文件路径
+                        file_path = os.path.normpath(os.path.abspath(file_path))
+                        logging.debug(f"规范化文件路径: {file_path}")
+
+                        if os.path.exists(file_path):
+                            self.selected_file = file_path  # 记录用户选中的文件路径
+                            self.info_label.config(text=f"选中文件: {file_name}")
+                            logging.info(f"用户选中文件: {file_path} (规范化路径: {file_path})")
+                        else:
+                            logging.warning(f"文件路径不存在: {file_path}")
+                            self.info_label.config(text=f"选中文件: {file_name} (路径不可用)")
+                            self.selected_file = None  # 清理无效的选中文件
+                    else:
+                        logging.warning(f"文件节点缺少路径信息: {item}, 文件名: {file_name}")
+                        self.info_label.config(text=f"选中文件: {file_name} (路径不可用)")
+                        self.selected_file = None  # 清理无效的选中文件
+            else:
+                logging.debug("未选中任何节点")
+                self.info_label.config(text="未选中任何节点")
+                self.selected_file = None  # 清理无效的选中文件
+
         except Exception as e:
-            print(f"处理单击事件失败: {e}")
+            logging.error(f"处理单击事件失败: {e}", exc_info=True)
+            self.info_label.config(text="处理单击事件失败")
+            self.selected_file = None  # 清理无效的选中文件
 
     def remove_selected_folder(self):
         """改进的移除文件夹功能，增加强制移除选项"""
@@ -3668,7 +3872,6 @@ class AudioPlayer:
             if invalid_refs:
                 if messagebox.askyesno("发现无效引用",
                                        "检测到文件夹引用错误，需要清理后继续，是否清理？"):
-
                     for item in self.folder_tree.get_children():
                         self.folder_tree.delete(item)
                     self.folders.clear()
@@ -3679,6 +3882,10 @@ class AudioPlayer:
             folder_path = filedialog.askdirectory()
             if not folder_path:
                 return
+
+            # 规范化文件夹路径
+            folder_path = os.path.normpath(os.path.abspath(folder_path))
+            logging.debug(f"添加文件夹路径: {folder_path}")
 
             for info in self.folders.values():
                 if os.path.samefile(info['path'], folder_path):
@@ -3693,8 +3900,11 @@ class AudioPlayer:
                 for file in natsorted(files):
                     if file.lower().endswith(('.mp3', '.wav')):
                         full_path = os.path.join(root, file)
+                        # 规范化文件路径
+                        full_path = os.path.normpath(os.path.abspath(full_path))
                         if os.path.exists(full_path):
                             audio_files.append(full_path)
+                            logging.debug(f"添加音频文件: {full_path}")
 
             if not audio_files:
                 self.update_status("未找到音频文件", 'warning')
@@ -3709,6 +3919,11 @@ class AudioPlayer:
                 'files': audio_files,
                 'expanded': False
             }
+
+            # 更新树形视图中的文件节点
+            for file_path in audio_files:
+                file_name = os.path.basename(file_path)
+                self.folder_tree.insert(tree_id, "end", text=file_name, values=(file_path,))
 
             self.save_settings()
             self.update_status(f"已添加文件夹: {folder_name}", 'success')
@@ -3765,13 +3980,14 @@ class AudioPlayer:
             self.current_playlist = valid_files
             self.current_index = 0
             self.current_loop = 0
+            self.current_position = 0  # 明确初始化进度条位置
 
             # 开始播放
             self.play_current_track()
 
             # 更新显示
             folder_name = self.folder_tree.item(folder_id)['text']
-            self.info_label.config(text=f"正在播放文件夹: {folder_name}")
+            # self.info_label.config(text=f"正在播放文件夹: {folder_name}")
             self.update_status(f"开始播放文件夹: {folder_name}", 'success')
 
         except Exception as e:
@@ -3780,44 +3996,171 @@ class AudioPlayer:
     @safe_call
     def play_pause(self):
         """播放/暂停功能"""
-        if self.is_following:
-            return  # 跟读模式下不响应普通播放/暂停
-
         try:
             if self.is_playing:
+                # 暂停播放
                 pygame.mixer.music.pause()
                 self.is_playing = False
                 self.play_button.config(text="播放")
                 self.update_status("已暂停", 'info')
+                logging.info("暂停播放")
+
+                # 记录暂停状态（普通模式和跟读模式）
+                self.paused_file = self.current_playlist[self.current_index] if self.current_playlist else None
+                self.paused_position = pygame.mixer.music.get_pos() / 1000.0 + self.current_position  # 精确记录暂停位置
+                self.paused_segment = self.current_segment if self.is_following else None
+                logging.info(f"暂停播放，文件: {self.paused_file}, 位置: {self.paused_position}秒, 段落: {self.paused_segment}")
 
                 # 取消进度更新定时器
                 if hasattr(self, 'update_timer') and self.update_timer:
                     self.root.after_cancel(self.update_timer)
                     self.update_timer = None
+
+                # 取消跟读模式的暂停定时器
+                if self.is_following and hasattr(self, '_follow_pause_timer') and self._follow_pause_timer:
+                    self.root.after_cancel(self._follow_pause_timer)
+                    self._follow_pause_timer = None
+
             else:
-                if not pygame.mixer.music.get_busy():  # 检查是否有音频在播放
-                    # 如果没有正在播放的音频，重新开始播放
-                    if not self.current_playlist:
-                        self.update_status("没有可播放的文件", 'warning')
+                # 恢复播放或开始新播放
+                current_file = self.current_playlist[self.current_index] if self.current_playlist else None
+                if not self.current_playlist:
+                    self.update_status("没有可播放的文件", 'warning')
+                    return
+
+                if self.is_following:
+                    # 跟读模式：继续播放当前段落
+                    if not self.subtitles or self.current_segment >= len(self.subtitles):
+                        self.update_status("没有可播放的段落", 'warning')
                         return
-                    self.play_current_track()
-                else:
-                    # 继续播放暂停的音频
-                    pygame.mixer.music.unpause()
-                    self.is_playing = True
+                    subtitle = self.subtitles[self.current_segment]
+                    start_time = float(subtitle['start_time']) / 1000.0
+                    end_time = float(subtitle['end_time']) / 1000.0
+
+                    # 如果有暂停位置，从暂停位置继续播放
+                    if self.paused_position is not None and start_time <= self.paused_position <= end_time:
+                        self.current_position = self.paused_position
+                    else:
+                        self.current_position = start_time
+
+                    # 始终调用 play_segment 以恢复跟读模式
+                    self.play_segment()
                     self.play_button.config(text="暂停")
-                    self.update_status("继续播放", 'info')
+                    self.update_status("继续播放段落", 'info')
+
+                else:
+                    # 普通模式：检查是否需要切换文件
+                    logging.debug(f"当前选中文件: {self.selected_file}, 当前播放文件: {current_file}")
+                    if hasattr(self, 'selected_file') and self.selected_file and self.selected_file != current_file:
+                        # 用户选中了新文件，尝试切换到新文件
+                        self.selected_file = os.path.normpath(os.path.abspath(self.selected_file))
+                        logging.debug(f"规范化选中文件路径: {self.selected_file}")
+
+                        if not os.path.exists(self.selected_file):
+                            logging.warning(f"选中的文件路径不存在: {self.selected_file}")
+                            self.update_status("选中的文件不存在", 'warning')
+                            return
+
+                        # 检查新文件是否在当前播放列表中
+                        normalized_playlist = [os.path.normpath(os.path.abspath(f)) for f in self.current_playlist]
+                        if self.selected_file in normalized_playlist:
+                            # 新文件在当前播放列表中，直接切换
+                            self.current_index = normalized_playlist.index(self.selected_file)
+                            self.current_position = 0
+                            self.paused_file = None  # 清理暂停状态
+                            self.paused_position = None
+                            logging.info(f"文件切换，播放新文件: {self.selected_file}")
+                            self.play_current_track()
+                        else:
+                            # 新文件不在当前播放列表中，动态更新播放列表
+                            parent = self._find_parent_folder(self.selected_file)
+                            logging.debug(f"找到的父文件夹: {parent}")
+                            if parent and parent in self.folders:
+                                folder_files = self.folders[parent]['files']
+                                # 规范化文件夹中的文件路径
+                                normalized_folder_files = [os.path.normpath(os.path.abspath(f)) for f in folder_files]
+                                if self.selected_file in normalized_folder_files:
+                                    # 更新播放列表并切换到新文件
+                                    self.current_playlist = normalized_folder_files
+                                    self.current_index = normalized_folder_files.index(self.selected_file)
+                                    self.current_position = 0
+                                    self.paused_file = None  # 清理暂停状态
+                                    self.paused_position = None
+                                    logging.info(f"更新播放列表并播放新文件: {self.selected_file}")
+                                    self.play_current_track()
+                                else:
+                                    logging.warning(f"选中的文件不在文件夹中: {self.selected_file}")
+                                    self.update_status("选中的文件不在文件夹中", 'warning')
+                                    return
+                            else:
+                                logging.warning(f"无法找到选中的文件所属文件夹: {self.selected_file}")
+                                self.update_status("无法找到选中的文件所属文件夹", 'warning')
+                                return
+                    else:
+                        # 继续播放暂停的文件
+                        if pygame.mixer.music.get_busy():
+                            # 继续播放暂停的音频
+                            pygame.mixer.music.unpause()
+                            self.is_playing = True
+                            self.play_button.config(text="暂停")
+                            self.update_status("继续播放", 'info')
+                        else:
+                            # 从暂停位置重新播放
+                            self.current_position = self.paused_position if self.paused_position is not None else 0
+                            logging.info(f"继续播放暂停的文件: {current_file}, 位置: {self.current_position}秒")
+                            self.play_current_track()
+
+                    # 强制更新进度条
+                    total_length = self.get_current_audio_length()
+                    if total_length > 0:
+                        self.current_position = min(self.current_position, total_length)
+                        progress = (self.current_position / total_length) * 100
+                        self.progress_scale.set(progress)
+                    else:
+                        self.progress_scale.set(0)
+                    self.time_label.config(
+                        text=f"{self.format_time(self.current_position)} / {self.format_time(total_length)}")
 
                 # 启动进度更新
                 if not self.is_seeking:
                     self.update_progress()
+
         except Exception as e:
+            logging.error(f"播放/暂停失败: {e}", exc_info=True)
             self.update_status(f"播放/暂停失败: {str(e)}", 'error')
+            self.is_playing = False
+            self.toggle_play_button(enable=False)
+            self.toggle_navigation_buttons(enable=False)
+
+    def _find_parent_folder(self, file_path):
+        """查找文件所属的父文件夹"""
+        try:
+            logging.debug(f"查找文件所属文件夹: {file_path}")
+            # 规范化文件路径
+            file_path = os.path.normpath(os.path.abspath(file_path))
+            logging.debug(f"规范化文件路径: {file_path}")
+
+            for folder_id, folder_data in self.folders.items():
+                folder_files = folder_data['files']
+                # 规范化文件夹中的文件路径
+                normalized_folder_files = [os.path.normpath(os.path.abspath(f)) for f in folder_files]
+                logging.debug(f"文件夹 {folder_id} 的文件列表: {normalized_folder_files}")
+
+                if file_path in normalized_folder_files:
+                    logging.info(f"找到文件所属文件夹: {folder_id}")
+                    return folder_id
+            logging.warning(f"未找到文件所属文件夹: {file_path}")
+            return None
+        except Exception as e:
+            logging.error(f"查找文件所属文件夹失败: {e}", exc_info=True)
+            return None
 
     def _load_and_play_track(self, index):
         """统一的曲目加载和播放处理"""
         try:
             self.current_index = index
+            self.current_position = 0  # 重置播放进度
+            self._playback['last_position'] = 0  # 重置最后播放位置
             self.current_segment = 0
             self.current_loop = 0
 
@@ -3830,6 +4173,7 @@ class AudioPlayer:
 
             # 开始播放
             if self.is_following:
+                # self.update_info_label()
                 self.play_segment()
             else:
                 self.play_current_track()
@@ -3859,9 +4203,17 @@ class AudioPlayer:
         try:
             pygame.mixer.music.stop()
             self.is_playing = False
-            self.is_paused_for_delay = False  # 重置暂停延迟状态
+            self.is_paused_for_delay = False
             self.is_playing_or_recording = False
             self.has_moved = False
+
+            # 清理暂停状态
+            self.paused_file = None
+            self.paused_position = None
+            self.paused_segment = None
+            self.current_position = 0
+            self.current_segment = 0
+            logging.info("停止播放，清理所有状态")
 
             # 清理所有定时器
             for timer_attr in ['update_timer', '_playback_delay_timer']:
@@ -3877,11 +4229,14 @@ class AudioPlayer:
             self.progress_scale.set(0)
             self.time_label.config(text="00:00 / 00:00")
 
-            # 如果在跟读模式，停止跟读
+            # 如果在跟读模式，停止跟读，不恢复普通播放
             if self.is_following:
-                self.stop_follow_reading()
+                self.stop_follow_reading(resume_normal_playback=False)
+                self.is_following = False
+                logging.info("停止跟读模式，不恢复普通播放")
 
             self.update_status("停止播放", 'info')
+
         except Exception as e:
             self.update_status(f"停止播放失败: {str(e)}", 'error')
 
@@ -4087,6 +4442,7 @@ class AudioPlayer:
 
     def play_current_track(self):
         """播放当前曲目"""
+        logging.info(f"播放当前曲目")
         try:
             if not self.current_playlist or self.current_index < 0 or self.current_index >= len(self.current_playlist):
                 logging.error("播放列表或索引无效")
@@ -4096,15 +4452,26 @@ class AudioPlayer:
             current_file = self.current_playlist[self.current_index]
             logging.info(f"加载音频文件: {current_file}")
 
+            # 停止并卸载上一曲
             pygame.mixer.music.stop()
             pygame.mixer.music.unload()
 
+            # 初始化播放状态
+            self._playback['last_position'] = self.current_position  # 初始化为当前播放位置
+            self.last_update_time = time.time()  # 初始化为当前时间
+            if hasattr(self, 'last_seek_position'):
+                delattr(self, 'last_seek_position')  # 清理 last_seek_position
+            logging.info(f"初始化播放状态，当前进度: {self.current_position}秒")
+
+            # 加载并播放当前曲目
             pygame.mixer.music.load(current_file)
             pygame.mixer.music.play(start=self.current_position)
             self.is_playing = True
             logging.info(f"从 {self.format_time(self.current_position)} 开始播放")
+            self.play_button.config(text="暂停")
 
             self.toggle_navigation_buttons(False)
+            self.toggle_play_button(enable=True)
 
             self.load_subtitles(current_file)
             if self.subtitles:
@@ -4125,13 +4492,16 @@ class AudioPlayer:
 
             total_length = self.get_current_audio_length()
             if total_length > 0:
+                print('查看拖动进度条时，当前位置是不是没有清理：', self.current_position)
                 self.current_position = min(self.current_position, total_length)
                 progress = (self.current_position / total_length) * 100
                 self.progress_scale.set(progress)
+            else:
+                self.progress_scale.set(0)
             self.time_label.config(text=f"{self.format_time(self.current_position)} / {self.format_time(total_length)}")
 
             if not self.is_seeking:
-                self.update_timer = self.root.after(500, self.update_progress)
+                self.update_timer = self.root.after(600, self.update_progress)
             self._check_timer = self.root.after(1000, lambda: self._start_playback_check())
             logging.info(f"播放开始，当前进度: {self.current_position} 秒")
 
@@ -4145,49 +4515,115 @@ class AudioPlayer:
         if not self.is_playing or self.is_seeking:
             return
 
+        # 如果处于编辑状态，跳过更新
+        if getattr(self, 'is_editing', False):
+            return
+
         try:
             pos = pygame.mixer.music.get_pos()
+            total_length = self.get_current_audio_length()
+            if total_length <= 0:
+                logging.warning("音频长度无效")
+                self.progress_scale.set(0)
+                self.time_label.config(text=f"{self.format_time(0)} / {self.format_time(0)}")
+                return
+
+            # 处理 get_pos() 返回 -1 的情况 # 如果 get_pos() 返回 -1，则可能是播放结束或者刚刚调用了 stop/unload
+            if pos == -1:
+                logging.info("检测到 get_pos() 返回 -1")
+                # 如果处于跟读模式，总是从段落起点播放，此时重置当前进度
+                if self.is_following:
+                    logging.info("跟读模式下，重置播放进度为 0")
+                    self.handle_playback_ended()
+                    return
+                else:
+                    # 普通模式下，若播放已经结束，则确保 current_position 重置为 0
+                    self.current_position = 0
+                    # 更新进度条和时间显示后调用播放结束处理
+                    self.progress_scale.set(0)
+                    self.time_label.config(text=f"{self.format_time(0)} / {self.format_time(total_length)}")
+                    logging.info("普通模式下，播放结束或拖动后检测到 get_pos() 返回 -1，调用 handle_playback_ended")
+                    self.handle_playback_ended()
+                    return
+
             if pos > 0:
-                relative_time = pos / 1000.0
+                relative_time = pos / 1000.0  # 将毫秒转换为秒
+
+                # 如果存在 last_seek_position，说明刚进行过拖动，使用 last_seek_position 作为基准
                 if hasattr(self, 'last_seek_position'):
                     self.current_position = self.last_seek_position + relative_time
                     delattr(self, 'last_seek_position')
+                    logging.info(f"使用 last_seek_position 更新位置: {self.current_position}秒")
                 else:
-                    if hasattr(self, 'last_update_time') and hasattr(self, 'last_position'):
-                        time_diff = (time.time() - self.last_update_time)
-                        self.current_position = self.last_position + time_diff
+                    # 确保 last_position 和 last_update_time 存在且有效
+                    if hasattr(self, 'last_position') and hasattr(self, 'last_update_time'):
+                        # 计算时间差
+                        time_diff = time.time() - self.last_update_time
+                        # 验证时间差是否合理（避免异常跳跃）
+                        if time_diff < 0 or time_diff > 2.0:  # 如果时间差异常（负值或过大），重置
+                            logging.warning(f"时间差异常: {time_diff}秒，重置 last_position 和 last_update_time")
+                            self._playback['last_position'] = self.current_position
+                            self.last_update_time = time.time()
+                            time_diff = 0
+
+                        self.current_position = self._playback['last_position'] + time_diff
+                        logging.info(f"基于 last_position 更新位置: {self.current_position}秒")
                     else:
+                        # 如果 last_position 或 last_update_time 不存在，直接使用 relative_time
                         self.current_position = relative_time
+                        logging.info(f"初始化位置: {self.current_position}秒")
 
-                self.last_position = self.current_position
+                # 更新 last_position 和 last_update_time
+                self._playback['last_position'] = self.current_position
                 self.last_update_time = time.time()
-            elif pos == -1:
-                self.handle_playback_ended()
-                return
 
-            total_length = self.get_current_audio_length()
-            if total_length > 0:
+                # 获取当前段落的起止时间（仅在跟读模式下使用）
+            if self.is_following and self.subtitles and self.current_segment < len(self.subtitles):
+                subtitle = self.subtitles[self.current_segment]
+                start_time = float(subtitle['start_time']) / 1000.0  # 转换为秒
+                end_time = float(subtitle['end_time']) / 1000.0  # 转换为秒
+                segment_duration = end_time - start_time
+
+                if segment_duration <= 0:
+                    logging.warning(f"段落 {self.current_segment + 1} 的持续时间无效")
+                    segment_duration = 1.0
+                    end_time = start_time + segment_duration
+
+                # 确保当前播放位置在段落范围内
+                if self.current_position < start_time:
+                    self.current_position = start_time
+                elif self.current_position > end_time:
+                    self.current_position = end_time
+
+                # 计算当前进度，基于整个音频长度
+                progress = (self.current_position / total_length) * 100
+                progress = min(100, max(0, progress))
+            elif not self.is_following and total_length > 0:
                 progress = min(100, (self.current_position / total_length) * 100)
-                if abs(progress - self.progress_scale.get()) > 0.5:
-                    self.progress_scale.set(progress)
+            else:
+                progress = 0  # 如果 total_length <= 0，进度条设为 0
+
+                # 更新进度条（仅当变化较大时更新）
+            if abs(progress - self.progress_scale.get()) > 0.5:
+                self.progress_scale.set(progress)
 
             self.time_label.config(text=f"{self.format_time(self.current_position)} / {self.format_time(total_length)}")
 
-            # 更新字幕（普通模式和跟读模式）
-            if self.subtitles:
+            # 更新字幕（这里仅限普通模式，跟读模式单独更新）
+            if self.subtitles and not self.is_following:
                 current_pos_ms = self.current_position * 1000
                 subtitle = self._find_subtitle_optimized(current_pos_ms)
                 if subtitle:
                     self._update_subtitle_display(subtitle)
 
             if self.is_playing and not self.is_seeking:
-                self.update_timer = self.root.after(500, self.update_progress)
+                self.update_timer = self.root.after(600, self.update_progress)
             logging.info(f"更新进度，当前进度: {self.current_position} 秒，pygame.get_pos: {pos} 毫秒")
 
         except Exception as e:
             logging.error(f"更新进度出错: {e}")
             if self.is_playing and not self.is_seeking:
-                self.update_timer = self.root.after(500, self.update_progress)
+                self.update_timer = self.root.after(600, self.update_progress)
 
     def _start_playback_check(self):
         """延迟启动播放状态检查"""
@@ -4390,7 +4826,7 @@ class AudioPlayer:
                     return
 
                 nonlocal matches, current_match_index
-                if not matches or current_match_index < 0:
+                if not matches and current_match_index < 0:
                     search_result_label.config(text="请先查找内容")
                     return
 
@@ -4476,6 +4912,16 @@ class AudioPlayer:
                 current_pos = self.current_position
                 current_segment = self.current_segment if was_following else None
 
+                # 设置编辑状态标志位
+                self.is_editing = True
+
+                # 验证跟读模式下的位置
+                if was_following and self.subtitles and current_segment is not None:
+                    subtitle = self.subtitles[current_segment]
+                    start_time = float(subtitle['start_time']) / 1000.0
+                    end_time = float(subtitle['end_time']) / 1000.0
+                    current_pos = max(start_time, min(end_time, current_pos))
+
                 # 确保所有播放模式都暂停
                 if was_following:
                     self.pause_follow_reading()
@@ -4560,6 +5006,11 @@ class AudioPlayer:
                     if was_following:
                         self.is_following = True
                         self.current_segment = current_segment if current_segment is not None else 0
+                        if self.subtitles and self.current_segment < len(self.subtitles):
+                            subtitle = self.subtitles[self.current_segment]
+                            start_time = float(subtitle['start_time']) / 1000.0
+                            end_time = float(subtitle['end_time']) / 1000.0
+                            self.current_position = max(start_time, min(end_time, current_pos))
                         self.play_segment()
                         logging.info(f"恢复跟读模式，当前段落: {self.current_segment}")
                     elif was_playing:
@@ -4577,7 +5028,10 @@ class AudioPlayer:
                         self.play_current_track()
                         self.is_editing_recovery = False
 
+                    # 强制更新进度条和时间显示
+                    self.update_progress()
                     edit_window.destroy()
+                    self.is_editing = False  # 清除编辑状态
                     self.update_status("字幕保存成功", 'success')
 
                 except UnicodeDecodeError as e:
@@ -4598,12 +5052,18 @@ class AudioPlayer:
                         if not messagebox.askyesno("确认", "有未保存的更改，确定要放弃吗？"):
                             return
                     edit_window.destroy()
+                    self.is_editing = False  # 清除编辑状态
                     logging.info("取消字幕编辑")
 
                     # 恢复播放状态
                     if was_following:
                         self.is_following = True
                         self.current_segment = current_segment if current_segment is not None else 0
+                        if self.subtitles and self.current_segment < len(self.subtitles):
+                            subtitle = self.subtitles[self.current_segment]
+                            start_time = float(subtitle['start_time']) / 1000.0
+                            end_time = float(subtitle['end_time']) / 1000.0
+                            self.current_position = max(start_time, min(end_time, current_pos))
                         self.play_segment()
                         logging.info(f"恢复跟读模式，当前段落: {self.current_segment}")
                     elif was_playing:
@@ -4621,8 +5081,19 @@ class AudioPlayer:
                         self.play_current_track()
                         self.is_editing_recovery = False
 
+                    # 强制更新字幕显示
+                    if self.subtitles:
+                        current_pos_ms = self.current_position * 1000
+                        subtitle = self._find_subtitle_optimized(current_pos_ms)
+                        if subtitle:
+                            self._update_subtitle_display(subtitle)
+
+                    # 强制更新进度条和时间显示
+                    self.update_progress()
+
                 except Exception as e:
                     logging.error(f"取消编辑失败: {e}")
+                    self.is_editing = False  # 确保即使发生错误，也清除编辑状态
                     self.update_status(f"取消编辑失败: {str(e)}", 'error')
 
             # 创建按钮框架
@@ -4664,6 +5135,7 @@ class AudioPlayer:
 
                 # 高亮当前段落或播放位置
                 edit_text.tag_configure('current', background='lightblue')
+
                 def find_text_range(start_ms, end_ms):
                     """根据时间范围找到对应的文本行号和字符位置"""
                     try:
@@ -4818,6 +5290,38 @@ class AudioPlayer:
             self.follow_reader.stop_recording()
             self.next_segment()
 
+    def create_control_buttons(self):
+        control_buttons = ttk.Frame(self.control_frame)
+        control_buttons.pack(fill="x", pady=5)
+
+        # 创建自定义按钮样式
+        style = ttk.Style()
+        style.configure('ControlButton.TButton',
+                        background='#FFA500',  # 橙色
+                        foreground='black',
+                        borderwidth=1,
+                        relief='raised')
+        style.map('ControlButton.TButton',
+                  background=[('disabled', '#E0E0E0')],
+                  foreground=[('disabled', '#A0A0A0')])
+
+        self.play_button = ttk.Button(control_buttons, text="播放",
+                                      command=self.play_pause, style='ControlButton.TButton')
+        self.play_button.pack(side="left", padx=5)
+
+        ttk.Button(control_buttons, text="上一曲",
+                   command=self.previous_track, style='ControlButton.TButton').pack(side="left", padx=5)
+        ttk.Button(control_buttons, text="下一曲",
+                   command=self.next_track, style='ControlButton.TButton').pack(side="left", padx=5)
+        ttk.Button(control_buttons, text="停止",
+                   command=self.stop, style='ControlButton.TButton').pack(side="left", padx=5)
+
+    def toggle_play_button(self, enable=True):
+        """启用或禁用播放/暂停按钮"""
+        state = "normal" if enable else "disabled"
+        self.play_button.config(state=state)
+        self.root.update()  # 强制更新界面
+
     def create_follow_control_buttons(self):
         """创建跟读控制按钮"""
         follow_control_frame = ttk.Frame(self.follow_frame)
@@ -4872,8 +5376,17 @@ class AudioPlayer:
     def toggle_navigation_buttons(self, enable=True):
         """启用或禁用导航按钮"""
         state = "normal" if enable else "disabled"
+
+        # 处理 prev_segment_btn 和 next_segment_btn
         for btn in [self.prev_segment_btn, self.next_segment_btn, self.repeat_segment_btn]:
             btn.config(state=state)
+
+        # # 单独处理 repeat_segment_btn
+        # if self.is_following:  # 如果是跟读模式，始终启用 is_following
+        #     self.repeat_segment_btn.config(state="normal")
+        # else:
+        #     self.repeat_segment_btn.config(state=state)
+
         self.root.update()  # 强制更新界面
 
     def toggle_recording_mode(self):
@@ -5050,9 +5563,19 @@ class AudioPlayer:
                 duration = 1.0
                 end_time = start_time + duration
 
+            # 如果有暂停位置，且在当前段落范围内，从暂停位置开始播放
+            if self.paused_position is not None and start_time <= self.paused_position <= end_time:
+                start_time = self.paused_position
+                logging.info(f"从暂停位置继续播放: {self.format_time(start_time)}")
+            else:
+                logging.info(f"从段落起始位置播放: {self.format_time(start_time)}")
+
             logging.info(f"播放段落 - 起止时间: {start_time}s -> {end_time}s")
 
+            # 初始化当前播放位置到段落的起始时间或暂停位置
             self.current_position = start_time
+            self._playback['last_position'] = start_time
+            self.last_update_time = time.time()
             logging.info(f"设置当前进度: {self.format_time(self.current_position)}")
             self._update_tree_selection()
 
@@ -5070,8 +5593,14 @@ class AudioPlayer:
                     self.update_status("加载音频失败", 'error')
                     self.is_playing = False
                     self.is_playing_or_recording = False
+                    # 禁用按钮
+                    self.toggle_play_button(enable=False)
+                    self.toggle_navigation_buttons(enable=False)
                     return
                 logging.info(f"音频加载耗时: {time.time() - start_load:.2f}秒")
+                self.play_button.config(text="暂停")
+                self.update_info_label()
+
 
                 pygame.mixer.music.set_volume(self._volume / 100.0)
                 self._playback['speed'] = float(self.speed_scale.get())
@@ -5082,8 +5611,13 @@ class AudioPlayer:
                 self.has_moved = False
                 logging.info(f"音频播放开始耗时: {time.time() - start_play:.2f}秒")
 
+                # 启用播放/暂停按钮和导航按钮（在播放时允许操作）
+                self.toggle_play_button(enable=True)
+                self.toggle_navigation_buttons(enable=True)
+
             if self.is_following:
-                pause_time = int(duration * 1000)
+                # 计算剩余播放时间（从当前播放位置到段落结束）
+                pause_time = int((end_time - start_time) * 1000)
                 logging.info(f"设置音频播放时间: {pause_time}ms")
                 if pause_time > 0 and self.is_following:
                     if hasattr(self, '_follow_pause_timer') and self._follow_pause_timer:
@@ -5092,7 +5626,9 @@ class AudioPlayer:
 
             # 启动进度更新（仅在播放时）
             if self.is_playing and should_play_audio and not self.is_seeking:
-                self.update_timer = self.root.after(500, self.update_progress)
+                if hasattr(self, 'update_timer') and self.update_timer:
+                    self.root.after_cancel(self.update_timer)
+                self.update_timer = self.root.after(600, self.update_progress)
 
             logging.info(f"段落播放开始 - 时间: {self.format_time(start_time)} -> {self.format_time(end_time)}")
             self.update_status(f"正在播放第 {self.current_segment + 1} 句", 'info')
@@ -5104,6 +5640,9 @@ class AudioPlayer:
             self.is_playing_or_recording = False
             if hasattr(self, '_follow_pause_timer') and self._follow_pause_timer:
                 self.root.after_cancel(self._follow_pause_timer)
+            # 禁用按钮
+            self.toggle_play_button(enable=False)
+            self.toggle_navigation_buttons(enable=False)
         finally:
             # 在暂停或异常时，停止进度更新
             if not self.is_playing and hasattr(self, 'update_timer') and self.update_timer:
@@ -5315,6 +5854,186 @@ class AudioPlayer:
                 self.load_subtitles(current_file)
         except Exception as e:
             logging.error(f"加载字幕失败: {e}")
+
+    def create_text_editor(self):
+        """创建文本编辑区域"""
+        # 创建文本编辑框架
+        text_edit_frame = ttk.LabelFrame(self.control_frame, text="文本编辑")
+        text_edit_frame.pack(fill="x", pady=5)
+
+        # 创建文本编辑区
+        self.text_editor = tk.Text(text_edit_frame, height=3, width=40)
+        self.text_editor.pack(pady=5, padx=5, fill="x")
+
+        # 创建保存按钮
+        save_btn = ttk.Button(text_edit_frame, text="保存", command=self.save_editor_text)
+        save_btn.pack(side="right", padx=5, pady=2)
+
+        # 加载已保存的文本
+        self.load_editor_text()
+
+    def save_editor_text(self):
+        """保存编辑器文本到临时文件"""
+        try:
+            text = self.text_editor.get("1.0", "end-1c")
+            with open(self.temp_text_file, 'w', encoding='utf-8') as f:
+                f.write(text)
+            self.update_status("文本已保存", 'success')
+        except Exception as e:
+            self.update_status(f"保存文本失败: {str(e)}", 'error')
+
+    def load_editor_text(self):
+        """从临时文件加载文本到编辑器"""
+        try:
+            if os.path.exists(self.temp_text_file):
+                with open(self.temp_text_file, 'r', encoding='utf-8') as f:
+                    text = f.read()
+                self.text_editor.delete("1.0", "end")
+                self.text_editor.insert("1.0", text)
+        except Exception as e:
+            self.update_status(f"加载文本失败: {str(e)}", 'error')
+
+    def play_editor_text(self):
+        """播放编辑器中的文本"""
+        text = self.text_editor.get("1.0", "end-1c")
+        if len(text.strip()) >= 4:
+            pygame.mixer.music.stop()
+            self.is_playing = False
+            time.sleep(0.5)  # 等待当前音频停止
+
+            engine = pyttsx3.init()
+            engine.setProperty('volume', 1.0)
+            # 设置语速，数值越低语速越慢（例如 130 为比较平缓自然的语速）
+            engine.setProperty('rate', 100)
+            voices = engine.getProperty('voices')
+            selected_voice = None
+            # 遍历系统语音，寻找名称中包含"David"的男中音（如Microsoft David Desktop）
+            for voice in voices:
+                if "David" in voice.name:
+                    selected_voice = voice.id
+                    break
+            if selected_voice:
+                engine.setProperty('voice', selected_voice)
+            else:
+                logging.warning("未找到预设男中音, 使用默认语音")
+
+            engine.say(text)
+            engine.runAndWait()
+
+            # 恢复原音频播放
+            if self.current_playlist:
+                self.play_current_track()
+
+    # 添加到 AudioPlayer 类中的新方法
+    def read_last_chinese_sentence(self):
+        """
+        从 self.subtitles 中提取所有字幕的中文内容，
+        按时间顺序拼接后，采用中文标点分割，
+        取最后一句（字符数大于4）进行TTS朗读。
+        """
+        try:
+            if not self.subtitles:
+                logging.info("没有字幕数据，不进行朗读")
+                return
+
+            # 假设每个字幕是字典，包含 'cn_text' 字段（中文内容）
+            all_text = " ".join(
+                sub.get('cn_text', '').strip() for sub in sorted(self.subtitles, key=lambda x: x['start_time']))
+            if not all_text:
+                logging.info("字幕中没有中文内容")
+                return
+
+            # 使用中文标点('.','。','？','！')分割句子
+            sentences = re.split(r'[。？！\.]', all_text)
+            sentences = [s.strip() for s in sentences if s.strip()]
+            if not sentences:
+                logging.info("分割后没有有效句子")
+                return
+            last_sentence = sentences[-1]
+            if len(last_sentence) <= 0:
+                logging.info("最后一句中文太短，不朗读")
+                return
+
+            engine = pyttsx3.init()
+            engine.setProperty('rate', 110)
+            engine.setProperty('volume', 1.0)
+            voices = engine.getProperty('voices')
+            selected_voice = None
+            # 遍历系统语音，寻找名称中包含"David"的男中音（如Microsoft David Desktop）
+            for voice in voices:
+                if "David" in voice.name:
+                    selected_voice = voice.id
+                    break
+            if selected_voice:
+                engine.setProperty('voice', selected_voice)
+            else:
+                logging.warning("未找到预设男中音, 使用默认语音")
+
+            engine.say(last_sentence)
+            engine.runAndWait()
+            logging.info(f"朗读最后一句中文: {last_sentence}")
+        except Exception as e:
+            logging.error(f"朗读最后一句中文失败: {e}")
+
+
+class TextEditorWindow:
+    def __init__(self, parent, player):
+        self.window = tk.Toplevel(parent)
+        self.window.title("文本编辑器")
+        self.window.geometry("600x400")
+        self.player = player
+
+        # 创建文本编辑区
+        self.text_frame = ttk.Frame(self.window)
+        self.text_frame.pack(fill="both", expand=True, padx=10, pady=5)
+
+        # 文本编辑区
+        self.text_editor = tk.Text(self.text_frame, wrap=tk.WORD)
+        self.text_editor.pack(fill="both", expand=True)
+
+        # 按钮区域
+        btn_frame = ttk.Frame(self.window)
+        btn_frame.pack(fill="x", padx=10, pady=5)
+
+        ttk.Button(btn_frame, text="保存", command=self.save_text).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="清空", command=self.clear_text).pack(side="left", padx=5)
+
+        # 加载已保存的文本
+        self.load_text()
+
+        # 绑定关闭事件
+        self.window.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+    def save_text(self):
+        """保存文本内容"""
+        try:
+            text = self.text_editor.get("1.0", "end-1c")
+            with open(self.player.temp_text_file, 'w', encoding='utf-8') as f:
+                f.write(text)
+            messagebox.showinfo("成功", "文本已保存")
+        except Exception as e:
+            messagebox.showerror("错误", f"保存失败: {str(e)}")
+
+    def load_text(self):
+        """加载已保存的文本"""
+        try:
+            if os.path.exists(self.player.temp_text_file):
+                with open(self.player.temp_text_file, 'r', encoding='utf-8') as f:
+                    text = f.read()
+                self.text_editor.delete("1.0", "end")
+                self.text_editor.insert("1.0", text)
+        except Exception as e:
+            messagebox.showerror("错误", f"加载文本失败: {str(e)}")
+
+    def clear_text(self):
+        """清空文本"""
+        if messagebox.askyesno("确认", "确定要清空文本吗?"):
+            self.text_editor.delete("1.0", "end")
+
+    def on_closing(self):
+        """关闭窗口前保存内容"""
+        self.save_text()
+        self.window.destroy()
 
 
 def main():
