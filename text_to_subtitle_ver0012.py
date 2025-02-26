@@ -143,7 +143,6 @@ class WhisperSubtitleGenerator:
         try:
             print('音频路径：', audio_path)
             print('字幕路径：', output_path)
-            # 如果字幕文件已存在，则跳过生成
             if output_path.exists():
                 self.update_status(f"字幕文件 {output_path.name} 已存在，跳过生成")
                 logging.info(f"字幕文件已存在，跳过生成: {output_path}")
@@ -154,6 +153,7 @@ class WhisperSubtitleGenerator:
             # 设置平滑参数
             smoothing = 0.3  # 基础延长时间(秒)
             min_gap = 0.1  # 最小间隔时间(秒)
+            target_gap = 0.01  # 目标间隔时间(10ms)
 
             # 获取英文识别结果
             result_en = self.model.transcribe(
@@ -164,39 +164,83 @@ class WhisperSubtitleGenerator:
             if output_path is None:
                 output_path = Path(audio_path).with_suffix('.srt')
 
-            with open(output_path, 'w', encoding='utf-8') as f:
-                segments = result_en["segments"]
-                total_segments = len(segments)
+            # 处理字幕段落
+            segments = result_en["segments"]
+            total_segments = len(segments)
+            adjusted_segments = []
 
-                for idx, seg_en in enumerate(segments):
-                    # 更新进度
-                    self.update_progress(idx + 1, total_segments)
-                    
-                    # 计算平滑结束时间
-                    start_time = seg_en["start"]
-                    end_time = seg_en["end"]
+            # 特殊处理第一段起始时间
+            if segments and segments[0]["start"] != 0:
+                segments[0]["start"] = 0.0
 
-                    if idx < len(segments) - 1:
-                        next_start = segments[idx + 1]["start"]
-                        gap = next_start - end_time
+            # 处理特殊词（如mss、mr）的断句
+            processed_segments = []
+            current_text = ""
+            current_start = segments[0]["start"]
+            current_end = segments[0]["end"]
 
-                        if gap > smoothing + min_gap:
-                            # 有足够空间，添加完整平滑时间
-                            new_end = end_time + smoothing
-                        else:
-                            # 空间不足，保留最小间隔
-                            new_end = next_start - min_gap
+            for i, seg in enumerate(segments):
+                text = seg["text"].strip()
+                end_time = seg["end"]
+
+                # 检查是否包含特殊词
+                if i < len(segments) - 1:
+                    next_text = segments[i + 1]["text"].strip()
+                    # 检查当前段是否包含特殊词且下一段可能是其延续
+                    if (text.endswith("miss.") or text.endswith("mr.")  or text.endswith("mrs.") or
+                            text.endswith("ms.") or text.endswith("dr.")):
+                        current_text += " " + text
+                        current_end = end_time
+                        continue
+
+                current_text += " " + text if current_text else text
+                processed_segments.append({
+                    "start": current_start,
+                    "end": current_end,
+                    "text": current_text.strip()
+                })
+                if i < len(segments) - 1:
+                    current_start = segments[i + 1]["start"]
+                    current_end = segments[i + 1]["end"]
+                    current_text = ""
+
+            # 调整时间间隔
+            final_segments = []
+            for i, seg in enumerate(processed_segments):
+                start_time = seg["start"]
+                end_time = seg["end"]
+
+                if i < len(processed_segments) - 1:
+                    next_start = processed_segments[i + 1]["start"]
+                    gap = next_start - end_time
+
+                    # 确保时间间隔为10ms
+                    if gap > target_gap:
+                        # 如果间隔大于10ms，调整当前段结束时间
+                        end_time = next_start - target_gap
                     else:
-                        # 最后一个片段，直接添加平滑时间
-                        new_end = end_time + smoothing
+                        # 如果间隔小于10ms，保持原样
+                        pass
 
-                    text_en = seg_en["text"].strip()
+                final_segments.append({
+                    "start": start_time,
+                    "end": end_time,
+                    "text": seg["text"]
+                })
+
+            # 写入字幕文件
+            with open(output_path, 'w', encoding='utf-8') as f:
+                for idx, seg in enumerate(final_segments):
+                    self.update_progress(idx + 1, len(final_segments))
+
+                    start_time = seg["start"]
+                    end_time = seg["end"]
+                    text_en = seg["text"]
+
+                    self.update_status(f"第{idx + 1}/{len(final_segments)}段 - {text_en}")
+
+                    # 翻译处理
                     text_zh = ""
-
-                    # 更新日志到界面
-                    self.update_status(f"第{idx + 1}/{total_segments}段 - {text_en}")
-
-                    # 翻译处理（保持原有逻辑）
                     if not self.no_translate_mode:
                         for retry in range(3):
                             try:
@@ -215,9 +259,9 @@ class WhisperSubtitleGenerator:
                     else:
                         text_zh = "无翻译"
 
-                    # 写入字幕文件（使用平滑后的时间）
+                    # 写入字幕
                     f.write(f"{idx + 1}\n")
-                    f.write(f"{self.format_time(start_time)} --> {self.format_time(new_end)}\n")
+                    f.write(f"{self.format_time(start_time)} --> {self.format_time(end_time)}\n")
                     f.write(f"英文字幕：{text_en}\n")
                     f.write(f"中文字幕：{text_zh}\n\n")
 

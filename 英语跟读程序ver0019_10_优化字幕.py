@@ -25,12 +25,15 @@ import hashlib
 import random
 import requests
 
-from text_to_subtitle_ver0010 import WhisperSubtitleGenerator
+from text_to_subtitle_ver0012 import WhisperSubtitleGenerator
 
 import shutil
 from collections import deque
 # 使用系统TTS播放文本
 import pyttsx3
+
+import datetime
+
 
 
 def safe_call(func):
@@ -6605,12 +6608,13 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 # 默认配置文件内容
 DEFAULT_CONFIG = {
-    "agreed_to_terms": False,  # 默认未同意协议
-    "volume": 50,  # 示例：默认音量
-    "theme": "light",  # 示例：默认主题
-    "language": "zh-CN"  # 示例：默认语言
+    "agreed_to_terms": False,  # 是否同意协议
+    "last_agreement_time": 0,  # 上次同意协议的时间戳（秒）
+    "last_weekly_check": 0,    # 上次每周检查的时间戳（秒）
+    "volume": 50,              # 示例：默认音量
+    "theme": "light",          # 示例：默认主题
+    "language": "zh-CN"        # 示例：默认语言
 }
-
 
 def ensure_config_dir():
     """确保配置文件目录存在"""
@@ -6792,15 +6796,30 @@ def center_window(window, width=None, height=None):
     window.geometry(f"{width}x{height}+{x}+{y}")
 
 
+def is_new_week(last_time):
+    """检查是否是新的一周（以周一为一周的开始）"""
+    if last_time == 0:
+        return True
+    last_date = datetime.datetime.fromtimestamp(last_time)
+    current_date = datetime.datetime.now()
+
+    # 获取周一的日期
+    last_monday = last_date - datetime.timedelta(days=last_date.weekday())
+    current_monday = current_date - datetime.timedelta(days=current_date.weekday())
+
+    return current_monday > last_monday
+
+
 def on_agree(agreement_window, callback):
-    """用户同意协议"""
-    print("用户同意协议")
+    """用户同意协议后的处理"""
     config = load_config()
+    current_time = int(time.time())
     config["agreed_to_terms"] = True
+    config["last_agreement_time"] = current_time
+    config["last_weekly_check"] = current_time
     save_config(config)
     agreement_window.destroy()
     callback()
-
 
 def on_disagree(agreement_window):
     """用户不同意协议"""
@@ -6837,7 +6856,6 @@ def main():
 
     # 设置窗口图标
     try:
-        # 尝试加载图标文件
         icon_path = os.path.join(os.path.dirname(__file__), 'assets', 'icon.ico')
         if os.path.exists(icon_path):
             root.iconbitmap(icon_path)
@@ -6848,37 +6866,47 @@ def main():
     window_width = 1000
     window_height = 800
     root.geometry(f"{window_width}x{window_height}")
-    center_window(root, window_width, window_height)  # 确保主窗口居中
+    center_window(root, window_width, window_height)
 
     # 设置窗口最小尺寸
     root.minsize(800, 600)
 
     # 确保主窗口可见
-    root.update()  # 强制更新主窗口
-    root.deiconify()  # 确保主窗口未被最小化
+    root.update()
+    root.deiconify()
 
     # 加载配置文件
     config = load_config()
 
+    def on_user_agreed():
+        start_player(root)
+
     # 检查是否需要显示协议弹窗
+    need_show_agreement = False
     if not config.get("agreed_to_terms", False):
         print('未同意协议')
+        need_show_agreement = True
+    elif is_new_week(config.get("last_weekly_check", 0)):
+        print('新的一周，需要重新同意协议')
+        need_show_agreement = True
+        # 更新每周检查时间
 
-        def on_user_agreed():
-            start_player(root)
+        config["last_weekly_check"] = int(time.time())
+        save_config(config)
 
+    if need_show_agreement:
         # 显示协议窗口，并等待用户操作
         agreement_window = show_agreement_window(root, on_user_agreed)
-        root.wait_window(agreement_window)  # 等待协议窗口关闭
+        root.wait_window(agreement_window)
 
         # 检查用户是否同意协议
-        updated_config = load_config()  # 重新加载配置以获取最新的 agreed_to_terms
+        updated_config = load_config()
         if not updated_config.get("agreed_to_terms", False):
             print("用户未同意协议，程序退出")
-            root.destroy()  # 用户未同意，销毁主窗口并退出
-            sys.exit(0)  # 优雅退出程序
+            root.destroy()
+            sys.exit(0)
     else:
-        print('已同意协议')
+        print('无需显示协议窗口')
         start_player(root)
 
 
