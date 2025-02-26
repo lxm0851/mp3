@@ -1168,6 +1168,7 @@ class AudioPlayer:
             self.current_index = 0  # 当前播放索引
             self.play_mode = "sequential"  # 播放模式
             self.is_playing = False
+            self.is_following_active = False  # 跟读流程仍在进行
             self.is_paused_for_delay = False  # 新增暂停延迟状态
             self.is_muted = False
 
@@ -1260,6 +1261,10 @@ class AudioPlayer:
             self.selected_file = None
             self.paused_position = None
 
+            self.current_segment_repeat_count = 0  # 当前段落的重复次数
+            self.max_segment_repeats = 3  # 默认最大重复次数
+            self.is_manual_switch = False  # 标记是否手动切换（前一句、后一句、重复本句）
+
         except Exception as e:
             print(f"初始化变量失败: {e}")
             raise
@@ -1328,21 +1333,18 @@ class AudioPlayer:
     def show_text_editor(self):
         """显示文本编辑窗口"""
         print("Entering show_text_editor")
-        print(f"hasattr(self, 'text_editor_window'): {hasattr(self, 'text_editor_window')}")
-        print(
-            f"self.text_editor_window: {self.text_editor_window if hasattr(self, 'text_editor_window') else 'Not exists'}")
-        print(f"self.root exists: {self.root.winfo_exists() if hasattr(self, 'root') else 'self.root not exists'}")
-
-        # 检查是否存在 text_editor_window 属性，并且不为 None，且窗口仍然存在
         if not hasattr(self,
                        'text_editor_window') or self.text_editor_window is None or not self.text_editor_window.window.winfo_exists():
             print("Creating new TextEditorWindow")
             self.text_editor_window = TextEditorWindow(self.root, self)
-            print(f"New text_editor_window created: {self.text_editor_window}")
+            # 加载最新的 temp_text_file 内容
+            self.text_editor_window.load_text()
         else:
             print("Existing window found, focusing")
-            self.text_editor_window.window.lift()  # 将现有窗口置于顶层
-            self.text_editor_window.window.focus_force()  # 强制聚焦
+            self.text_editor_window.window.lift()
+            self.text_editor_window.window.focus_force()
+            # 重新加载 temp_text_file 内容
+            self.text_editor_window.load_text()
 
     def create_widgets(self):
         """创建界面组件"""
@@ -1538,6 +1540,12 @@ class AudioPlayer:
             command=self.toggle_follow_reading
         )
         self.follow_button.pack(side="left", padx=5)  # 使用 side="left"
+
+        # 添加跟读次数标签和输入框
+        ttk.Label(button_frame, text="单句跟读次数:").pack(side="left", padx=5)
+        self.follow_repeat_entry = ttk.Entry(button_frame, width=5)
+        self.follow_repeat_entry.insert(0, "3")  # 默认值为 3 次
+        self.follow_repeat_entry.pack(side="left", padx=5)
 
         # 在跟读控制区域添加字幕偏移控制
         offset_frame = ttk.Frame(self.follow_frame)
@@ -1902,6 +1910,18 @@ class AudioPlayer:
                 self._process_switch_queue()
                 return
 
+            if self.is_following and not self.is_manual_switch:
+                # 检查是否需要重复当前段落
+                self.current_segment_repeat_count += 1
+                if self.current_segment_repeat_count < self.max_segment_repeats:
+                    self.follow_text.insert('end', f"\n重复播放第 {self.current_segment + 1} 句 "
+                                                   f"(第 {self.current_segment_repeat_count + 1}/{self.max_segment_repeats} 次)\n",
+                                            'prompt')
+                    self.play_segment()
+                    return
+                else:
+                    self.current_segment_repeat_count = 0  # 重置重复次数
+
             next_segment = self.current_segment + 1
             if next_segment < self.total_segments:
                 self.follow_text.insert('end', "\n=== 准备下一段 ===\n", 'prompt')
@@ -1912,6 +1932,7 @@ class AudioPlayer:
             self.current_loop += 1
             if self.current_loop < self.max_follow_loops:
                 self.current_segment = 0
+                self.current_segment_repeat_count = 0  # 重置重复次数
                 self.follow_text.insert('end', f"\n开始第 {self.current_loop + 1} 轮跟读\n", 'title')
                 self.play_segment()
                 return
@@ -1920,18 +1941,21 @@ class AudioPlayer:
             if play_mode == "loop_one":
                 self.current_loop = 0
                 self.current_segment = 0
+                self.current_segment_repeat_count = 0  # 重置重复次数
                 self.follow_text.insert('end', "\n重新开始跟读当前音频\n", 'title')
                 self.play_segment()
             elif self.current_index < len(self.current_playlist) - 1:
                 self.current_index += 1
                 self.current_loop = 0
                 self.current_segment = 0
+                self.current_segment_repeat_count = 0  # 重置重复次数
                 self.follow_text.insert('end', f"\n开始跟读下一个音频文件\n", 'title')
                 self.start_follow_reading()
             elif play_mode == "loop_all":
                 self.current_index = 0
                 self.current_loop = 0
                 self.current_segment = 0
+                self.current_segment_repeat_count = 0  # 重置重复次数
                 self.follow_text.insert('end', "\n重新开始跟读播放列表\n", 'title')
                 self.start_follow_reading()
             else:
@@ -3570,17 +3594,32 @@ class AudioPlayer:
             logging.error(f"清理缓存失败: {e}")
 
     def toggle_follow_reading(self):
-        """改进的跟读切换功能"""
+        """切换跟读模式"""
         try:
-            if not self.is_following:
-                self.is_following = True
-                self.follow_button.config(text="停止跟读")
-                self.start_follow_reading()  # 调用跟读开始处理
-                self.update_status("跟读模式已开启", 'info')
+            # 获取跟读次数
+            repeat_count = self.follow_repeat_entry.get().strip()
+            if repeat_count:
+                repeat_count = int(repeat_count)
+                if repeat_count < 1:
+                    repeat_count = 1  # 最小值为 1
+                self.max_segment_repeats = repeat_count
             else:
-                self.stop_follow_reading(resume_normal_playback=True)  # 停止跟读后恢复普通播放
-        except Exception as e:
-            self.update_status(f"切换跟读失败: {str(e)}", 'error')
+                self.max_segment_repeats = 3  # 默认值为 3
+        except ValueError:
+            self.update_status("跟读次数必须为正整数，已使用默认值 3", 'warning')
+            self.max_segment_repeats = 3
+
+        if not self.is_following:
+            self.is_following = True
+            self.follow_button.config(text="停止跟读")
+            self.update_status("开始跟读模式", 'info')
+            self.current_segment_repeat_count = 0  # 重置重复次数
+            self.is_manual_switch = False  # 重置手动切换标志
+            self.start_follow_reading()
+        else:
+            self.stop_follow_reading()
+            self.follow_button.config(text="开始跟读")
+            self.update_status("停止跟读模式", 'info')
 
     def start_follow_reading(self):
         """改进的跟读开始功能"""
@@ -3662,7 +3701,8 @@ class AudioPlayer:
         if self.is_following:
             try:
                 pygame.mixer.music.pause()
-                self.is_playing = False
+                self.is_playing = False  # 必须保留，表示音频已暂停，否则会影响进度条更新
+                self.is_following_active = True  # 跟读流程仍在进行
                 self.is_playing_or_recording = False
                 self.has_moved = False
                 if hasattr(self, 'update_timer') and self.update_timer:
@@ -3679,8 +3719,9 @@ class AudioPlayer:
                 self.follow_text.insert('end', f"{reference_text}\n", 'en')
                 self.follow_text.see('end')
 
-                self.toggle_navigation_buttons(False)
-                self.toggle_play_button(enable=False)
+                if not self.no_record_var:  # 不跟读模式下，随时有效，否则禁止
+                    self.toggle_play_button(enable=False)
+                    self.toggle_navigation_buttons(enable=False)
 
                 if hasattr(self, 'no_record_mode') and self.no_record_mode:
                     self.follow_text.insert('end', "\n不录音模式，跳过录音...\n", 'prompt')
@@ -4143,8 +4184,8 @@ class AudioPlayer:
             logging.error(f"播放/暂停失败: {e}", exc_info=True)
             self.update_status(f"播放/暂停失败: {str(e)}", 'error')
             self.is_playing = False
-            self.toggle_play_button(enable=False)
-            self.toggle_navigation_buttons(enable=False)
+            # self.toggle_play_button(enable=False)
+            # self.toggle_navigation_buttons(enable=False)
 
     def _find_parent_folder(self, file_path):
         """查找文件所属的父文件夹"""
@@ -5556,6 +5597,7 @@ class AudioPlayer:
         try:
             start_cleanup = time.time()
             self._cleanup_audio_resources()
+            self.is_manual_switch = False
             time.sleep(0.5)
             logging.info(f"资源清理耗时: {time.time() - start_cleanup:.2f}秒")
 
@@ -5564,7 +5606,8 @@ class AudioPlayer:
             subtitle = self.subtitles[self.current_segment]
 
             logging.info(
-                f"播放段落 - 文件: {os.path.basename(current_file)}, 段落: {self.current_segment + 1}/{len(self.subtitles)}")
+                f"播放段落 - 文件: {os.path.basename(current_file)}, 段落: {self.current_segment + 1}/{len(self.subtitles)}, "
+                f"重复次数: {self.current_segment_repeat_count + 1}/{self.max_segment_repeats}")
 
             # 更新字幕显示（确保普通模式和跟读模式都显示）
             self.show_current_subtitle(subtitle)
@@ -5577,7 +5620,6 @@ class AudioPlayer:
                 duration = 1.0
                 end_time = start_time + duration
 
-            # 如果有暂停位置，且在当前段落范围内，从暂停位置开始播放
             if self.paused_position is not None and start_time <= self.paused_position <= end_time:
                 start_time = self.paused_position
                 logging.info(f"从暂停位置继续播放: {self.format_time(start_time)}")
@@ -5586,7 +5628,6 @@ class AudioPlayer:
 
             logging.info(f"播放段落 - 起止时间: {start_time}s -> {end_time}s")
 
-            # 初始化当前播放位置到段落的起始时间或暂停位置
             self.current_position = start_time
             self._playback['last_position'] = start_time
             self.last_update_time = time.time()
@@ -5607,14 +5648,15 @@ class AudioPlayer:
                     self.update_status("加载音频失败", 'error')
                     self.is_playing = False
                     self.is_playing_or_recording = False
-                    # 禁用按钮
+
+
                     self.toggle_play_button(enable=False)
                     self.toggle_navigation_buttons(enable=False)
                     return
+
                 logging.info(f"音频加载耗时: {time.time() - start_load:.2f}秒")
                 self.play_button.config(text="暂停")
                 self.update_info_label()
-
 
                 pygame.mixer.music.set_volume(self._volume / 100.0)
                 self._playback['speed'] = float(self.speed_scale.get())
@@ -5625,12 +5667,10 @@ class AudioPlayer:
                 self.has_moved = False
                 logging.info(f"音频播放开始耗时: {time.time() - start_play:.2f}秒")
 
-                # 启用播放/暂停按钮和导航按钮（在播放时允许操作）
                 self.toggle_play_button(enable=True)
                 self.toggle_navigation_buttons(enable=True)
 
             if self.is_following:
-                # 计算剩余播放时间（从当前播放位置到段落结束）
                 pause_time = int((end_time - start_time) * 1000)
                 logging.info(f"设置音频播放时间: {pause_time}ms")
                 if pause_time > 0 and self.is_following:
@@ -5638,14 +5678,14 @@ class AudioPlayer:
                         self.root.after_cancel(self._follow_pause_timer)
                     self._follow_pause_timer = self.root.after(pause_time, self.pause_for_follow)
 
-            # 启动进度更新（仅在播放时）
             if self.is_playing and should_play_audio and not self.is_seeking:
                 if hasattr(self, 'update_timer') and self.update_timer:
                     self.root.after_cancel(self.update_timer)
                 self.update_timer = self.root.after(600, self.update_progress)
 
             logging.info(f"段落播放开始 - 时间: {self.format_time(start_time)} -> {self.format_time(end_time)}")
-            self.update_status(f"正在播放第 {self.current_segment + 1} 句", 'info')
+            self.update_status(f"正在播放第 {self.current_segment + 1} 句 "
+                               f"(重复 {self.current_segment_repeat_count + 1}/{self.max_segment_repeats})", 'info')
 
         except Exception as e:
             logging.error(f"播放段落失败: {e}")
@@ -5654,11 +5694,9 @@ class AudioPlayer:
             self.is_playing_or_recording = False
             if hasattr(self, '_follow_pause_timer') and self._follow_pause_timer:
                 self.root.after_cancel(self._follow_pause_timer)
-            # 禁用按钮
             self.toggle_play_button(enable=False)
             self.toggle_navigation_buttons(enable=False)
         finally:
-            # 在暂停或异常时，停止进度更新
             if not self.is_playing and hasattr(self, 'update_timer') and self.update_timer:
                 self.root.after_cancel(self.update_timer)
                 self.update_timer = None
@@ -5671,9 +5709,9 @@ class AudioPlayer:
                     return
             self._last_switch_time = time.time()
 
-            if self.is_playing_or_recording and self.has_moved:
-                self.update_status("当前状态下只能切换一次，请等待播放/录音结束", 'info')
-                return
+            # if self.is_playing_or_recording and self.has_moved and not self.no_record_var:
+            #     self.update_status("当前状态下只能切换一次，请等待播放/录音结束", 'info')
+            #     return
 
             if self._segment_switch_lock:
                 self.update_status("正在处理切换，请稍候...", "info")
@@ -5688,6 +5726,9 @@ class AudioPlayer:
             if self.current_segment > 0:
                 self._cleanup_audio_resources()
                 self.current_segment -= 1
+                self.current_segment_repeat_count = 0  # 重置重复次数
+                # self.is_manual_switch = True  # 标记手动切换
+
                 self.follow_text.delete('1.0', 'end')
                 self.follow_text.insert('end', f"准备播放第 {self.current_segment + 1}/{len(self.subtitles)} 段\n", 'prompt')
                 self.follow_text.insert('end', "正在加载...\n", 'info')
@@ -5734,9 +5775,9 @@ class AudioPlayer:
                     return
             self._last_switch_time = time.time()
 
-            if self.is_playing_or_recording and self.has_moved:
-                self.update_status("当前状态下只能切换一次，请等待播放/录音结束", 'info')
-                return
+            # if self.is_playing_or_recording and self.has_moved and not self.no_record_mode:
+            #     self.update_status("当前状态下只能切换一次，请等待播放/录音结束", 'info')
+            #     return
 
             if self._segment_switch_lock:
                 self.update_status("正在处理切换，请稍候...", "info")
@@ -5751,6 +5792,9 @@ class AudioPlayer:
             if self.current_segment < len(self.subtitles) - 1:
                 self._cleanup_audio_resources()
                 self.current_segment += 1
+                self.current_segment_repeat_count = 0  # 重置重复次数
+                # self.is_manual_switch = True  # 标记手动切换
+
                 self.follow_text.delete('1.0', 'end')
                 self.follow_text.insert('end', f"准备播放第 {self.current_segment + 1}/{len(self.subtitles)} 段\n", 'prompt')
                 self.follow_text.insert('end', "正在加载...\n", 'info')
@@ -5809,6 +5853,9 @@ class AudioPlayer:
 
             if 0 <= self.current_segment < len(self.subtitles):
                 self._cleanup_audio_resources()
+                self.current_segment_repeat_count = 0  # 重置重复次数
+                # self.is_manual_switch = True  # 标记手动切换
+
                 current_subtitle = self.subtitles[self.current_segment]
                 current_pos = float(current_subtitle['start_time']) / 1000.0  # 转换为秒
                 self.current_position = current_pos  # 修正单位为秒
@@ -5893,6 +5940,10 @@ class AudioPlayer:
             with open(self.temp_text_file, 'w', encoding='utf-8') as f:
                 f.write(text)
             self.update_status("文本已保存", 'success')
+            # 如果 TextEditorWindow 已打开，更新其内容
+            if hasattr(self,
+                       'text_editor_window') and self.text_editor_window is not None and self.text_editor_window.window.winfo_exists():
+                self.text_editor_window.load_text()
         except Exception as e:
             self.update_status(f"保存文本失败: {str(e)}", 'error')
 
@@ -6016,15 +6067,15 @@ class TextEditorWindow:
         # 绑定文本修改事件
         self.text_editor.bind("<<Modified>>", self.on_text_modified)
 
+        # 加载已保存的文本
+        self.load_text()
+
         # 按钮区域
         btn_frame = ttk.Frame(self.window)
         btn_frame.pack(fill="x", padx=10, pady=5)
 
         ttk.Button(btn_frame, text="保存", command=self.save_text).pack(side="left", padx=5)
         ttk.Button(btn_frame, text="清空", command=self.clear_text).pack(side="left", padx=5)
-
-        # 加载已保存的文本
-        self.load_text()
 
         # 绑定关闭事件
         self.window.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -6033,7 +6084,7 @@ class TextEditorWindow:
         """当文本被修改时，标记为已修改"""
         if self.text_editor.edit_modified():
             self.is_modified = True
-            print("Text modified")
+            # print(f"Text modified, is_modified set to True")
         self.text_editor.edit_modified(False)  # 重置修改标志
 
     def save_text(self):
@@ -6042,35 +6093,73 @@ class TextEditorWindow:
             text = self.text_editor.get("1.0", "end-1c")
             with open(self.player.temp_text_file, 'w', encoding='utf-8') as f:
                 f.write(text)
-            self.is_modified = False  # 保存后标记为未修改
+            self.is_modified = False
             print("Text saved, is_modified set to False")
-            messagebox.showinfo("成功", "文本已保存")
+            self.show_auto_close_message("成功", "文本已保存", duration=2000)  # 自动关闭，持续2秒
         except Exception as e:
             messagebox.showerror("错误", f"保存失败: {str(e)}")
+
+    def show_auto_close_message(self, title, message, duration=2000):
+        """显示自动关闭的通知窗口"""
+        # 创建通知窗口
+        notification = tk.Toplevel(self.window)
+        notification.title(title)
+        notification.geometry("300x100")
+        notification.resizable(False, False)
+        notification.transient(self.window)  # 设置为临时窗口，保持在主窗口之上
+        notification.grab_set()  # 捕获焦点，防止用户操作主窗口
+
+        # 居中显示
+        self.center_window(notification)
+
+        # 显示消息
+        label = ttk.Label(notification, text=message, font=("Arial", 12))
+        label.pack(pady=20, padx=20)
+
+        # 在指定时间后自动关闭
+        notification.after(duration, notification.destroy)
+
+    def center_window(self, window):
+        """将窗口居中显示"""
+        window.update_idletasks()
+        width = window.winfo_width()
+        height = window.winfo_height()
+        x = (window.winfo_screenwidth() // 2) - (width // 2)
+        y = (window.winfo_screenheight() // 2) - (height // 2)
+        window.geometry(f"{width}x{height}+{x}+{y}")
 
     def load_text(self):
         """加载已保存的文本"""
         try:
             if os.path.exists(self.player.temp_text_file):
+                # 禁用修改事件，防止加载文本触发 <<Modified>>
+                self.text_editor.bind("<<Modified>>", lambda e: "break")
+                self.text_editor.delete("1.0", "end")
                 with open(self.player.temp_text_file, 'r', encoding='utf-8') as f:
                     text = f.read()
-                self.text_editor.delete("1.0", "end")
                 self.text_editor.insert("1.0", text)
-            self.is_modified = False  # 加载后标记为未修改
-            print("Text loaded, is_modified set to False")
+                # 重新启用修改事件
+                self.text_editor.bind("<<Modified>>", self.on_text_modified)
+            self.is_modified = False
+            print(f"Text loaded, is_modified set to False")
         except Exception as e:
             messagebox.showerror("错误", f"加载文本失败: {str(e)}")
 
     def clear_text(self):
         """清空文本"""
         if messagebox.askyesno("确认", "确定要清空文本吗?"):
+            # 禁用修改事件，防止清空文本触发 <<Modified>>
+            self.text_editor.bind("<<Modified>>", lambda e: "break")
             self.text_editor.delete("1.0", "end")
-            self.is_modified = True  # 清空后标记为已修改
-            print("Text cleared, is_modified set to True")
+            # 重新启用修改事件
+            self.text_editor.bind("<<Modified>>", self.on_text_modified)
+            self.is_modified = True
+            print(f"Text cleared, is_modified set to True")
 
     def on_closing(self):
         """关闭窗口前检查是否需要保存"""
-        print("Closing TextEditorWindow")
+        # print("Closing TextEditorWindow")
+        # print(f"is_modified before closing: {self.is_modified}")
         if self.is_modified:
             # 如果文本被修改，提示是否保存
             response = messagebox.askyesnocancel("未保存的更改", "文本已修改，是否保存更改？")
@@ -6087,7 +6176,7 @@ class TextEditorWindow:
             self.window.destroy()
         # 清理引用，防止下次打开时引用已销毁的窗口
         self.player.text_editor_window = None
-        print("TextEditorWindow closed and reference cleared")
+        # print("TextEditorWindow closed and reference cleared")
 
 
 def main():

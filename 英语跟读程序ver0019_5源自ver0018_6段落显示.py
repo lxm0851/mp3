@@ -1327,8 +1327,22 @@ class AudioPlayer:
 
     def show_text_editor(self):
         """显示文本编辑窗口"""
-        if not hasattr(self, 'text_editor_window') or not self.text_editor_window.winfo_exists():
+        print("Entering show_text_editor")
+        print(f"hasattr(self, 'text_editor_window'): {hasattr(self, 'text_editor_window')}")
+        print(
+            f"self.text_editor_window: {self.text_editor_window if hasattr(self, 'text_editor_window') else 'Not exists'}")
+        print(f"self.root exists: {self.root.winfo_exists() if hasattr(self, 'root') else 'self.root not exists'}")
+
+        # 检查是否存在 text_editor_window 属性，并且不为 None，且窗口仍然存在
+        if not hasattr(self,
+                       'text_editor_window') or self.text_editor_window is None or not self.text_editor_window.window.winfo_exists():
+            print("Creating new TextEditorWindow")
             self.text_editor_window = TextEditorWindow(self.root, self)
+            print(f"New text_editor_window created: {self.text_editor_window}")
+        else:
+            print("Existing window found, focusing")
+            self.text_editor_window.window.lift()  # 将现有窗口置于顶层
+            self.text_editor_window.window.focus_force()  # 强制聚焦
 
     def create_widgets(self):
         """创建界面组件"""
@@ -5978,10 +5992,18 @@ class AudioPlayer:
 
 class TextEditorWindow:
     def __init__(self, parent, player):
+        print("Initializing TextEditorWindow")
+        print(f"Parent exists: {parent.winfo_exists()}")
         self.window = tk.Toplevel(parent)
         self.window.title("文本编辑器")
         self.window.geometry("600x400")
         self.player = player
+        self.is_modified = False  # 跟踪文本是否被修改
+
+        # 确保窗口显示
+        self.window.lift()  # 将窗口置于顶层
+        self.window.focus_force()  # 强制聚焦
+        print(f"TextEditorWindow created: {self.window.winfo_exists()}")
 
         # 创建文本编辑区
         self.text_frame = ttk.Frame(self.window)
@@ -5990,6 +6012,9 @@ class TextEditorWindow:
         # 文本编辑区
         self.text_editor = tk.Text(self.text_frame, wrap=tk.WORD)
         self.text_editor.pack(fill="both", expand=True)
+
+        # 绑定文本修改事件
+        self.text_editor.bind("<<Modified>>", self.on_text_modified)
 
         # 按钮区域
         btn_frame = ttk.Frame(self.window)
@@ -6004,12 +6029,21 @@ class TextEditorWindow:
         # 绑定关闭事件
         self.window.protocol("WM_DELETE_WINDOW", self.on_closing)
 
+    def on_text_modified(self, event=None):
+        """当文本被修改时，标记为已修改"""
+        if self.text_editor.edit_modified():
+            self.is_modified = True
+            print("Text modified")
+        self.text_editor.edit_modified(False)  # 重置修改标志
+
     def save_text(self):
         """保存文本内容"""
         try:
             text = self.text_editor.get("1.0", "end-1c")
             with open(self.player.temp_text_file, 'w', encoding='utf-8') as f:
                 f.write(text)
+            self.is_modified = False  # 保存后标记为未修改
+            print("Text saved, is_modified set to False")
             messagebox.showinfo("成功", "文本已保存")
         except Exception as e:
             messagebox.showerror("错误", f"保存失败: {str(e)}")
@@ -6022,6 +6056,8 @@ class TextEditorWindow:
                     text = f.read()
                 self.text_editor.delete("1.0", "end")
                 self.text_editor.insert("1.0", text)
+            self.is_modified = False  # 加载后标记为未修改
+            print("Text loaded, is_modified set to False")
         except Exception as e:
             messagebox.showerror("错误", f"加载文本失败: {str(e)}")
 
@@ -6029,11 +6065,29 @@ class TextEditorWindow:
         """清空文本"""
         if messagebox.askyesno("确认", "确定要清空文本吗?"):
             self.text_editor.delete("1.0", "end")
+            self.is_modified = True  # 清空后标记为已修改
+            print("Text cleared, is_modified set to True")
 
     def on_closing(self):
-        """关闭窗口前保存内容"""
-        self.save_text()
-        self.window.destroy()
+        """关闭窗口前检查是否需要保存"""
+        print("Closing TextEditorWindow")
+        if self.is_modified:
+            # 如果文本被修改，提示是否保存
+            response = messagebox.askyesnocancel("未保存的更改", "文本已修改，是否保存更改？")
+            if response is True:  # 用户选择保存
+                self.save_text()
+                self.window.destroy()
+            elif response is False:  # 用户选择不保存
+                self.window.destroy()
+            else:  # 用户取消关闭
+                print("Closing canceled")
+                return
+        else:
+            # 如果文本未修改，直接关闭
+            self.window.destroy()
+        # 清理引用，防止下次打开时引用已销毁的窗口
+        self.player.text_editor_window = None
+        print("TextEditorWindow closed and reference cleared")
 
 
 def main():

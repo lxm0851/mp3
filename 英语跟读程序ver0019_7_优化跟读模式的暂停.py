@@ -962,6 +962,7 @@ class WhisperFollowReading:
         finally:
             self.is_recording = False
             self.is_playing = False  # 确保播放状态重置
+            self.is_following_active = False  # 跟读流程需取消
             if not self.frames:
                 self.frames = []
 
@@ -1965,6 +1966,29 @@ class AudioPlayer:
             logging.error(f"继续播放失败: {e}")
             self.update_status("继续播放失败", 'error')
 
+    def _update_max_segment_repeats(self):
+        """更新最大重复次数"""
+        try:
+            repeat_count = self.follow_repeat_entry.get().strip()
+            if repeat_count:
+                repeat_count = int(repeat_count)
+                if repeat_count < 1:
+                    repeat_count = 1  # 最小值为 1
+                self.max_segment_repeats = repeat_count
+            else:
+                self.max_segment_repeats = 3  # 默认值为 3
+        except ValueError:
+            self.update_status("跟读次数必须为正整数，已使用默认值 3", 'warning')
+            self.max_segment_repeats = 3
+
+    def _get_adjusted_repeat_count(self, subtitle_text):
+        """根据单词数调整重复次数"""
+        words = subtitle_text.split()
+        word_count = len(words)
+        if word_count <= 5 and self.max_segment_repeats > 3:
+            return self.max_segment_repeats // 2 + 1
+        return self.max_segment_repeats
+
     def stop_follow_reading(self, resume_normal_playback=False):
         """改进的停止跟读功能"""
         # if not self.is_following:  # 避免重复调用
@@ -1990,6 +2014,7 @@ class AudioPlayer:
 
             # 重置状态
             self.is_playing = False
+            self.is_following_active = False  # 跟读流程需取消
             self.is_playing_or_recording = False
             self.has_moved = False
             self._retry_count = 0
@@ -2078,12 +2103,14 @@ class AudioPlayer:
                 logging.error(f"加载音频失败: {e}")
                 self.update_status("加载音频失败", 'error')
                 self.is_playing = False  # 重置播放状态
+                self.is_following_active = False  # 跟读流程需取消
                 self.play_button.config(text="播放")  # 更新按钮状态
 
         except Exception as e:
             logging.error(f"恢复普通播放失败: {e}")
             self.update_status("恢复普通播放失败", 'error')
             self.is_playing = False  # 重置播放状态
+            self.is_following_active = False  # 跟读流程需取消
             self.play_button.config(text="播放")  # 更新按钮状态
 
     def calculate_improved_similarity(self, text1, text2):
@@ -3595,22 +3622,11 @@ class AudioPlayer:
 
     def toggle_follow_reading(self):
         """切换跟读模式"""
-        try:
-            # 获取跟读次数
-            repeat_count = self.follow_repeat_entry.get().strip()
-            if repeat_count:
-                repeat_count = int(repeat_count)
-                if repeat_count < 1:
-                    repeat_count = 1  # 最小值为 1
-                self.max_segment_repeats = repeat_count
-            else:
-                self.max_segment_repeats = 3  # 默认值为 3
-        except ValueError:
-            self.update_status("跟读次数必须为正整数，已使用默认值 3", 'warning')
-            self.max_segment_repeats = 3
+        self._update_max_segment_repeats()  # 更新最大重复次数
 
         if not self.is_following:
             self.is_following = True
+            self.is_following_active = True  # 开始跟读流程
             self.follow_button.config(text="停止跟读")
             self.update_status("开始跟读模式", 'info')
             self.current_segment_repeat_count = 0  # 重置重复次数
@@ -3618,6 +3634,7 @@ class AudioPlayer:
             self.start_follow_reading()
         else:
             self.stop_follow_reading()
+            self.is_following_active = False  # 停止跟读流程
             self.follow_button.config(text="开始跟读")
             self.update_status("停止跟读模式", 'info')
 
@@ -3697,7 +3714,7 @@ class AudioPlayer:
             self.update_status(f"准备音频分段失败: {str(e)}", 'error')
 
     def pause_for_follow(self):
-        """改进的跟读暂停功能"""
+        """改进的跟读暂停功能——正常跟读模式下的自动暂停"""
         if self.is_following:
             try:
                 pygame.mixer.music.pause()
@@ -4052,19 +4069,20 @@ class AudioPlayer:
     def play_pause(self):
         """播放/暂停功能"""
         try:
-            if self.is_playing:
-                # 暂停播放
+            if self.is_playing or (self.is_following and getattr(self, 'is_following_active', False)):
+                # 暂停播放或跟读流程
                 pygame.mixer.music.pause()
                 self.is_playing = False
+                self.is_following_active = False  # 暂停跟读流程
                 self.play_button.config(text="播放")
                 self.update_status("已暂停", 'info')
-                logging.info("暂停播放")
+                logging.info("暂停播放或跟读流程")
 
                 # 记录暂停状态（普通模式和跟读模式）
                 self.paused_file = self.current_playlist[self.current_index] if self.current_playlist else None
                 self.paused_position = pygame.mixer.music.get_pos() / 1000.0 + self.current_position  # 精确记录暂停位置
                 self.paused_segment = self.current_segment if self.is_following else None
-                logging.info(f"暂停播放，文件: {self.paused_file}, 位置: {self.paused_position}秒, 段落: {self.paused_segment}")
+                logging.info(f"暂停状态，文件: {self.paused_file}, 位置: {self.paused_position}秒, 段落: {self.paused_segment}")
 
                 # 取消进度更新定时器
                 if hasattr(self, 'update_timer') and self.update_timer:
@@ -4100,6 +4118,7 @@ class AudioPlayer:
 
                     # 始终调用 play_segment 以恢复跟读模式
                     self.play_segment()
+                    self.is_following_active = True  # 恢复跟读流程
                     self.play_button.config(text="暂停")
                     self.update_status("继续播放段落", 'info')
 
@@ -4184,6 +4203,7 @@ class AudioPlayer:
             logging.error(f"播放/暂停失败: {e}", exc_info=True)
             self.update_status(f"播放/暂停失败: {str(e)}", 'error')
             self.is_playing = False
+            self.is_following_active = False  # 异常时重置状态
             # self.toggle_play_button(enable=False)
             # self.toggle_navigation_buttons(enable=False)
 
@@ -4258,6 +4278,7 @@ class AudioPlayer:
         try:
             pygame.mixer.music.stop()
             self.is_playing = False
+            self.is_following_active = False  # 跟读流程需取消
             self.is_paused_for_delay = False
             self.is_playing_or_recording = False
             self.has_moved = False
@@ -4522,6 +4543,7 @@ class AudioPlayer:
             pygame.mixer.music.load(current_file)
             pygame.mixer.music.play(start=self.current_position)
             self.is_playing = True
+            self.is_following_active = False  # 跟读流程需取消
             logging.info(f"从 {self.format_time(self.current_position)} 开始播放")
             self.play_button.config(text="暂停")
 
@@ -4564,6 +4586,7 @@ class AudioPlayer:
             logging.error(f"播放失败: {e}")
             self.update_status(f"播放失败: {str(e)}", 'error')
             self.is_playing = False
+            self.is_following_active = False  # 跟读流程需取消
 
     def update_progress(self):
         """更新进度条和时间显示"""
@@ -5323,11 +5346,12 @@ class AudioPlayer:
             return False
 
     def pause_follow_reading(self):
-        """暂停跟读"""
+        """暂停跟读——手动点击按钮的暂停"""
         if self.is_following:
             self.follow_reader.stop_recording()
             self.is_following = False
             self.is_playing = False  # 确保普通播放状态也重置
+            self.is_following_active = False  # 跟读流程需取消
             pygame.mixer.music.pause()  # 确保音频暂停
             self.follow_button.config(text="继续跟读")
             logging.info("跟读模式已暂停，所有播放状态已重置")
@@ -5516,6 +5540,7 @@ class AudioPlayer:
 
             # 重置播放状态
             self.is_playing = False
+            self.is_following_active = False  # 跟读流程需取消
             self.is_playing_or_recording = False
             self.has_moved = False
             self._start_time = 0
@@ -5647,6 +5672,7 @@ class AudioPlayer:
                     logging.error("音频加载失败")
                     self.update_status("加载音频失败", 'error')
                     self.is_playing = False
+                    self.is_following_active = False  # 跟读流程需取消
                     self.is_playing_or_recording = False
 
 
@@ -5691,6 +5717,7 @@ class AudioPlayer:
             logging.error(f"播放段落失败: {e}")
             self.update_status(f"播放段落失败: {str(e)}", 'error')
             self.is_playing = False
+            self.is_following_active = False  # 跟读流程需取消
             self.is_playing_or_recording = False
             if hasattr(self, '_follow_pause_timer') and self._follow_pause_timer:
                 self.root.after_cancel(self._follow_pause_timer)
@@ -5889,6 +5916,7 @@ class AudioPlayer:
         try:
             pygame.mixer.music.stop()
             self.is_playing = False
+            self.is_following_active = False  # 跟读流程需取消
             self.is_playing_or_recording = False
             self.has_moved = False
             self.update_status("播放已停止", 'info')
@@ -5964,6 +5992,7 @@ class AudioPlayer:
         if len(text.strip()) >= 4:
             pygame.mixer.music.stop()
             self.is_playing = False
+            self.is_following_active = False  # 跟读流程需取消
             time.sleep(0.5)  # 等待当前音频停止
 
             engine = pyttsx3.init()

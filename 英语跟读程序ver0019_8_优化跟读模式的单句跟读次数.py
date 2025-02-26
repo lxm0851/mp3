@@ -739,8 +739,28 @@ class SubtitleGeneratorWindow:
 
 
 class WhisperFollowReading:
-    def __init__(self, model_size="tiny"):
-        self.whisper_model = whisper.load_model(model_size)
+    def __init__(self, model_size="tiny", api_type="whisper"):
+        # 设置API类型
+        self.api_type = api_type  # 可选值: "whisper", "baidu", "tencent"
+
+        # 根据API类型初始化
+        if api_type == "whisper":
+            self.whisper_model = whisper.load_model(model_size)
+        else:
+            self.whisper_model = None  # 使用API时不需要whisper模型
+
+        # API配置参数
+        self.api_config = {
+            "baidu": {
+                "app_id": "",
+                "api_key": "",
+                "secret_key": ""
+            },
+            "tencent": {
+                "secret_id": "",
+                "secret_key": ""
+            }
+        }
         self.is_recording = False
         self.recording_thread = None
         self._stop_recognition = False  # 停止标志
@@ -763,6 +783,186 @@ class WhisperFollowReading:
         self.silence_threshold = 3  # 允许的静音间隔
         self.recognition_queue = []
         self.is_processing = False
+
+    def set_api_config(self, api_type, config):
+        """设置API配置"""
+        if api_type in self.api_config:
+            self.api_config[api_type].update(config)
+            self.api_type = api_type
+            return True
+        return False
+
+    def recognize_speech(self, audio_file):
+        """根据选择的API类型进行语音识别"""
+        try:
+            # 检查停止标志
+            if self._stop_recognition:
+                logging.info("语音识别已停止，不执行")
+                return None
+
+            if not os.path.exists(audio_file):
+                logging.error(f"音频文件不存在: {audio_file}")
+                return None
+
+            # 根据API类型选择处理方法
+            if self.api_type == "whisper":
+                return self._recognize_with_whisper(audio_file)
+            elif self.api_type == "baidu":
+                return self._recognize_with_baidu(audio_file)
+            elif self.api_type == "tencent":
+                return self._recognize_with_tencent(audio_file)
+            else:
+                logging.error(f"不支持的API类型: {self.api_type}")
+                return None
+
+        except Exception as e:
+            logging.error(f"语音识别错误: {e}")
+            return None
+
+    def _recognize_with_whisper(self, audio_file):
+        """使用Whisper本地模型进行识别"""
+        try:
+            # 使用 Whisper 进行识别
+            result = self.whisper_model.transcribe(
+                audio_file,
+                task="translate",
+                language="en",
+                beam_size=1,
+                word_timestamps=False
+            )
+
+            return {
+                'en_text': result.get("text", "").strip(),
+                'cn_text': result.get("translation", "").strip() if "translation" in result else "",
+                'segments': result.get("segments", []),
+                'confidence': result.get("confidence", 0)
+            }
+        except Exception as e:
+            logging.error(f"Whisper识别错误: {e}")
+            return None
+
+    def _recognize_with_baidu(self, audio_file):
+        """使用百度语音识别API"""
+        try:
+            from aip import AipSpeech
+
+            # 检查配置
+            config = self.api_config["baidu"]
+            if not all([config["app_id"], config["api_key"], config["secret_key"]]):
+                logging.error("百度API配置不完整")
+                return None
+
+            # 初始化AipSpeech
+            client = AipSpeech(config["app_id"], config["api_key"], config["secret_key"])
+
+            # 读取音频文件
+            with open(audio_file, 'rb') as fp:
+                audio_data = fp.read()
+
+            # 调用百度API识别英文
+            result = client.asr(audio_data, 'wav', 16000, {'dev_pid': 1737})  # 1737是英文
+
+            if result["err_no"] == 0:
+                en_text = result["result"][0]
+
+                # 调用百度翻译API (如果需要)
+                cn_text = ""  # 这里可以添加翻译逻辑
+
+                return {
+                    'en_text': en_text,
+                    'cn_text': cn_text,
+                    'segments': [],
+                    'confidence': 0.8  # 百度API没有返回置信度，使用默认值
+                }
+            else:
+                logging.error(f"百度语音识别失败: {result['err_msg']}")
+                return None
+
+        except Exception as e:
+            logging.error(f"百度API调用错误: {e}")
+            return None
+
+    def _recognize_with_tencent(self, audio_file):
+        """使用腾讯语音识别API"""
+        try:
+            import base64
+            import json
+            import hmac
+            import hashlib
+            import requests
+            from urllib.parse import urlencode
+            from datetime import datetime
+
+            # 检查配置
+            config = self.api_config["tencent"]
+            if not all([config["secret_id"], config["secret_key"]]):
+                logging.error("腾讯API配置不完整")
+                return None
+
+            # 读取音频文件并转为base64
+            with open(audio_file, 'rb') as fp:
+                audio_data = base64.b64encode(fp.read()).decode('utf-8')
+
+            # 准备请求参数
+            host = "asr.tencentcloudapi.com"
+            algorithm = "TC3-HMAC-SHA256"
+            timestamp = int(datetime.utcnow().timestamp())
+            date = datetime.utcnow().strftime('%Y-%m-%d')
+
+            # 构建请求体
+            request_data = {
+                "ProjectId": 0,
+                "SubServiceType": 2,  # 英文识别
+                "EngSerViceType": "16k_en",
+                "SourceType": 1,
+                "Data": audio_data,
+                "DataLen": len(audio_data),
+            }
+
+            # 签名逻辑
+            http_request_method = "POST"
+            canonical_uri = "/"
+            canonical_querystring = ""
+            ct = "application/json; charset=utf-8"
+            payload = json.dumps(request_data)
+
+            # 省略复杂的签名逻辑...
+            # 实际实现中需要按照腾讯云API签名规则生成签名
+
+            headers = {
+                "Authorization": "签名结果",
+                "Content-Type": ct,
+                "Host": host,
+                "X-TC-Action": "SentenceRecognition",
+                "X-TC-Timestamp": str(timestamp),
+                "X-TC-Version": "2019-06-14",
+                "X-TC-Region": "ap-guangzhou",
+            }
+
+            # 发送请求
+            url = f"https://{host}"
+            response = requests.post(url, headers=headers, data=payload)
+            result = response.json()
+
+            if "Response" in result and "Result" in result["Response"]:
+                en_text = result["Response"]["Result"]
+
+                # 可以调用腾讯翻译API获取中文翻译
+                cn_text = ""
+
+                return {
+                    'en_text': en_text,
+                    'cn_text': cn_text,
+                    'segments': [],
+                    'confidence': 0.8  # 使用默认值
+                }
+            else:
+                logging.error(f"腾讯语音识别失败: {result}")
+                return None
+
+        except Exception as e:
+            logging.error(f"腾讯API调用错误: {e}")
+            return None
 
     def save_audio_files(self):
         """改进的音频文件保存功能"""
@@ -1040,7 +1240,11 @@ class AudioPlayer:
 
         self.current_position = 0
 
-        self.follow_reader = WhisperFollowReading()
+        self.follow_reader = WhisperFollowReading(api_type=self.speech_api_type)
+
+        # 设置API配置
+        for api_type, config in self.speech_api_config.items():
+            self.follow_reader.set_api_config(api_type, config)
 
         # 初始化whisper模型
         print("正在加载Whisper模型...")
@@ -1183,10 +1387,24 @@ class AudioPlayer:
             self.follow_pause_duration = 8000  # 跟读暂停时长(ms)
             self.no_record_mode = False
             self.no_playback_mode = False
-            self.no_record_var = tk.BooleanVar(value=False)
-            self.no_playback_var = tk.BooleanVar(value=False)
             self.is_editing_recovery = False
             self.is_editing = False
+
+            # 语音识别API相关变量
+            self.speech_api_type = "whisper"  # 默认使用whisper
+            self.speech_api_config = {
+                "baidu": {
+                    "app_id": "",
+                    "api_key": "",
+                    "secret_key": ""
+                },
+                "tencent": {
+                    "secret_id": "",
+                    "secret_key": ""
+                }
+            }
+            self.is_manual_recording = False  # 是否处于手动录音模式
+            self.manually_recording = False  # 是否正在手动录音
 
             # 字幕相关变量
             self.subtitles = []
@@ -1985,8 +2203,19 @@ class AudioPlayer:
         """根据单词数调整重复次数"""
         words = subtitle_text.split()
         word_count = len(words)
-        if word_count <= 5 and self.max_segment_repeats > 3:
-            return self.max_segment_repeats // 2 + 1
+        # print('查看word_count：', subtitle_text, word_count, self.max_segment_repeats)
+
+        if word_count <= 4 and self.max_segment_repeats >= 3:
+            self.max_segment_repeats = self.max_segment_repeats // 2
+            # print('重置次数1')
+        elif word_count <= 7 and self.max_segment_repeats >= 3:
+            self.max_segment_repeats = self.max_segment_repeats // 2 + 1
+            # print('重置次数2')
+        elif word_count <= 7 and self.max_segment_repeats == 2:
+            self.max_segment_repeats = self.max_segment_repeats // 2
+            # print('重置次数3')
+
+        # print('查看调整后的重复次数：', self.max_segment_repeats)
         return self.max_segment_repeats
 
     def stop_follow_reading(self, resume_normal_playback=False):
@@ -3652,6 +3881,9 @@ class AudioPlayer:
             self.prepare_audio_segments()
             self.current_segment = 0
 
+            # 更新字幕预览窗口（如果已打开）
+            self.update_subtitle_preview_if_open()  # 新增调用
+
             # 更新界面
             if self.current_segment == 1:
                 self.progress_scale.set(0)
@@ -4500,13 +4732,7 @@ class AudioPlayer:
         try:
             if not self.current_playlist or self.current_index >= len(self.current_playlist):
                 return
-
             current_file = self.current_playlist[self.current_index]
-
-            # 清除现有选择
-            self.folder_tree.selection_remove(*self.folder_tree.selection())
-
-            # 查找并选中当前文件
             for folder_id in self.folders:
                 for child in self.folder_tree.get_children(folder_id):
                     if os.path.basename(current_file) == self.folder_tree.item(child)['text']:
@@ -4517,31 +4743,36 @@ class AudioPlayer:
             logging.error(f"更新树形选择失败: {e}")
 
     def play_current_track(self):
-        """播放当前曲目"""
-        logging.info(f"播放当前曲目")
+        """播放当前曲目，封装逻辑"""
         try:
-            if not self.current_playlist or self.current_index < 0 or self.current_index >= len(self.current_playlist):
-                logging.error("播放列表或索引无效")
-                self.update_status("播放失败: 播放列表或索引无效", 'error')
-                return
+            if not self.current_playlist or self.current_index >= len(self.current_playlist):
+                self.update_status("无可播放曲目", 'warning')
+                return False
 
+            # 更新树形视图中的选择
+            self._update_tree_selection()
+
+            # 加载音频文件
             current_file = self.current_playlist[self.current_index]
-            logging.info(f"加载音频文件: {current_file}")
+            # 检查文件是否存在
+            if not os.path.exists(current_file):
+                self.clean_invalid_folders()
+                self.update_status(f"文件不存在: {current_file}", 'error')
+                return False
 
-            # 停止并卸载上一曲
-            pygame.mixer.music.stop()
-            pygame.mixer.music.unload()
+            # 加载字幕
+            try:
+                self.load_subtitles(current_file)
+                logging.info(f"字幕加载成功: {current_file}")
+            except Exception as e:
+                logging.error
 
-            # 初始化播放状态
-            self._playback['last_position'] = self.current_position  # 初始化为当前播放位置
-            self.last_update_time = time.time()  # 初始化为当前时间
-            if hasattr(self, 'last_seek_position'):
-                delattr(self, 'last_seek_position')  # 清理 last_seek_position
-            logging.info(f"初始化播放状态，当前进度: {self.current_position}秒")
+            # 自动更新字幕预览窗口（如果已打开）
+            self.update_subtitle_preview_if_open()
 
-            # 加载并播放当前曲目
+            # 初始化播放器
             pygame.mixer.music.load(current_file)
-            pygame.mixer.music.play(start=self.current_position)
+            pygame.mixer.music.play()
             self.is_playing = True
             self.is_following_active = False  # 跟读流程需取消
             logging.info(f"从 {self.format_time(self.current_position)} 开始播放")
@@ -4550,7 +4781,6 @@ class AudioPlayer:
             self.toggle_navigation_buttons(False)
             self.toggle_play_button(enable=True)
 
-            self.load_subtitles(current_file)
             if self.subtitles:
                 current_pos_ms = self.current_position * 1000
                 subtitle = self._find_subtitle_optimized(current_pos_ms)
@@ -4587,6 +4817,53 @@ class AudioPlayer:
             self.update_status(f"播放失败: {str(e)}", 'error')
             self.is_playing = False
             self.is_following_active = False  # 跟读流程需取消
+
+    def update_subtitle_preview_if_open(self):
+        """如果字幕预览窗口已打开（非编辑状态），则自动更新字幕内容"""
+        if not hasattr(self, 'subtitle_edit_window') or self.subtitle_edit_window is None:
+            return
+
+        try:
+            # 检查窗口是否仍然存在
+            if not self.subtitle_edit_window.winfo_exists():
+                self.subtitle_edit_window = None
+                self.subtitle_edit_text = None
+                return
+
+            # 确保不在编辑模式
+            if hasattr(self, 'is_subtitle_editing') and self.is_subtitle_editing:
+                return
+
+            current_file = self.current_playlist[self.current_index]
+            srt_path = os.path.splitext(current_file)[0] + '.srt'
+
+            if os.path.exists(srt_path):
+                # 读取新的字幕文件内容
+                with open(srt_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+
+                # 更新预览窗口的文本内容
+                if hasattr(self, 'subtitle_edit_text') and self.subtitle_edit_text:
+                    self.subtitle_edit_text.config(state='normal')
+                    self.subtitle_edit_text.delete('1.0', tk.END)
+                    self.subtitle_edit_text.insert('1.0', content)
+                    self.subtitle_edit_text.config(state='disabled')
+
+                # 更新窗口标题
+                self.subtitle_edit_window.title(f"字幕预览 - {os.path.basename(current_file)}")
+                self.update_status("已自动更新字幕预览", 'info')
+            else:
+                if hasattr(self, 'subtitle_edit_text') and self.subtitle_edit_text:
+                    self.subtitle_edit_text.config(state='normal')
+                    self.subtitle_edit_text.delete('1.0', tk.END)
+                    self.subtitle_edit_text.config(state='disabled')
+                self.subtitle_edit_window.title(f"字幕预览 - {os.path.basename(current_file)} (无字幕)")
+                self.update_status(f"字幕文件不存在: {srt_path}", 'warning')
+                return
+        except Exception as e:
+            logging.error(f"更新字幕预览失败: {e}")
+            self.subtitle_edit_window = None
+            self.subtitle_edit_text = None
 
     def update_progress(self):
         """更新进度条和时间显示"""
@@ -4785,7 +5062,16 @@ class AudioPlayer:
             # 创建编辑窗口
             edit_window = tk.Toplevel(self.root)
             edit_window.title(f"字幕编辑 - {os.path.basename(current_file)}")
-            edit_window.geometry("800x900")
+            edit_window.geometry("800x950")
+
+            # 保存窗口引用，以便其他方法可以访问
+            self.subtitle_edit_window = edit_window
+
+            # 绑定焦点事件
+            edit_window.bind('<FocusIn>', self._on_subtitle_window_focus)
+
+            # 绑定关闭事件
+            edit_window.protocol("WM_DELETE_WINDOW", self._on_subtitle_window_close)
 
             # 保存当前状态
             was_playing = self.is_playing
@@ -4801,7 +5087,7 @@ class AudioPlayer:
             toolbar.pack(fill='x', pady=(0, 5))
 
             # 创建搜索框架
-            search_frame = ttk.LabelFrame(toolbar, text="搜索和替换——需先点击‘编辑’按钮进入编辑模式")
+            search_frame = ttk.LabelFrame(toolbar, text="搜索和替换——需先点击'编辑'按钮进入编辑模式")
             search_frame.pack(side='left', padx=5)
 
             search_var = tk.StringVar()
@@ -4826,8 +5112,14 @@ class AudioPlayer:
             edit_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
             y_scrollbar.config(command=edit_text.yview)
 
+            # 保存文本编辑区引用，以便其他方法可以访问
+            self.subtitle_edit_text = edit_text
+
             # 配置初始状态为只读
             edit_text.config(state='disabled')
+
+            # 设置编辑状态标志为False（初始状态为预览模式）
+            self.is_subtitle_editing = False
 
             # 搜索匹配项列表和当前匹配索引
             matches = []
@@ -4841,7 +5133,7 @@ class AudioPlayer:
                     print('弹窗2')
                     edit_window.grab_set()  # 确保编辑窗口获得焦点
                     edit_window.focus_force()  # 强制聚焦
-                    messagebox.showinfo("提示", "请先点击‘编辑’按钮进入编辑模式", parent=edit_window)
+                    messagebox.showinfo("提示", "请先点击'编辑'按钮进入编辑模式", parent=edit_window)
                     return False
                 return True
 
@@ -4985,7 +5277,11 @@ class AudioPlayer:
                 return is_valid, '\n'.join(error_msg)
 
             def start_editing():
-                """开始编辑"""
+                """开始编辑字幕"""
+                # 更改编辑状态标志
+                self.is_subtitle_editing = True
+
+                # 其他原有的编辑逻辑
                 nonlocal current_pos, current_segment
                 current_pos = self.current_position
                 current_segment = self.current_segment if was_following else None
@@ -5123,7 +5419,11 @@ class AudioPlayer:
                     logging.error(f"保存字幕失败: {e}")
 
             def cancel_editing():
-                """取消编辑"""
+                """取消编辑，恢复播放"""
+                # 更改编辑状态标志
+                self.is_subtitle_editing = False
+
+                # 其他原有的取消编辑逻辑
                 try:
                     # 检查是否有未保存的更改
                     if edit_text.edit_modified():
@@ -5322,6 +5622,64 @@ class AudioPlayer:
         except Exception as e:
             self.update_status(f"打开字幕编辑器失败: {str(e)}", 'error')
             logging.error(f"打开字幕编辑器失败: {e}")
+
+    def _on_subtitle_window_close(self):
+        """字幕窗口关闭时的清理逻辑"""
+        if hasattr(self, 'subtitle_edit_window') and self.subtitle_edit_window:
+            self.subtitle_edit_window.destroy()
+            self.subtitle_edit_window = None
+        if hasattr(self, 'subtitle_edit_text'):
+            self.subtitle_edit_text = None
+        self.is_subtitle_editing = False
+        logging.info("字幕编辑窗口已关闭")
+
+    def _on_subtitle_window_focus(self, event):
+        """字幕窗口获得焦点时，检查并更新字幕内容"""
+        # 取消之前的防抖定时器
+        if hasattr(self, '_focus_debounce_timer'):
+            self.root.after_cancel(self._focus_debounce_timer)
+
+        # 设置新的防抖定时器，延迟执行实际的事件处理逻辑
+        self._focus_debounce_timer = self.root.after(100, self._handle_focus_event)
+
+    def _handle_focus_event(self):
+        """实际处理焦点事件的逻辑"""
+        # 清理防抖定时器
+        self._focus_debounce_timer = None
+
+        # 检查窗口是否存在
+        if not hasattr(self, 'subtitle_edit_window') or self.subtitle_edit_window is None:
+            return
+
+        try:
+            # 检查窗口是否仍然存在
+            if not self.subtitle_edit_window.winfo_exists():
+                self.subtitle_edit_window = None
+                self.subtitle_edit_text = None
+                return
+
+            # 记录当前曲目信息（可选，用于调试）
+            current_file = self.current_playlist[self.current_index] if self.current_playlist else "未知文件"
+            logging.info(f"字幕窗口获得焦点，当前文件: {current_file}")
+
+            # 根据编辑模式或预览模式处理焦点事件
+            if hasattr(self, 'is_subtitle_editing') and self.is_subtitle_editing:
+                self._handle_edit_mode_focus()
+            else:
+                self._handle_preview_mode_focus()
+        except Exception as e:
+            logging.error(f"处理焦点事件失败: {e}")
+            self.subtitle_edit_window = None
+            self.subtitle_edit_text = None
+
+    def _handle_edit_mode_focus(self):
+        """处理编辑模式的焦点事件"""
+        # 编辑模式下不更新字幕，但可以记录焦点事件
+        logging.info("字幕编辑窗口获得焦点（编辑模式）")
+
+    def _handle_preview_mode_focus(self):
+        """处理预览模式的焦点事件"""
+        self.update_subtitle_preview_if_open()
 
     def save_subtitles_to_file(self, srt_path, subtitles):
         """保存字幕到文件"""
@@ -5630,9 +5988,17 @@ class AudioPlayer:
             current_file = self.current_playlist[self.current_index]
             subtitle = self.subtitles[self.current_segment]
 
+            # print('当前段落字幕：', subtitle, self.current_segment, self.subtitles)
+            # 更新最大重复次数（确保每次播放前都更新）
+            self._update_max_segment_repeats()
+
+            # 根据字幕文本调整实际重复次数
+            subtitle_text = subtitle.get('en_text', '')  # 或根据需要调整
+            adjusted_max_repeats = self._get_adjusted_repeat_count(subtitle_text)
+
             logging.info(
                 f"播放段落 - 文件: {os.path.basename(current_file)}, 段落: {self.current_segment + 1}/{len(self.subtitles)}, "
-                f"重复次数: {self.current_segment_repeat_count + 1}/{self.max_segment_repeats}")
+                f"重复次数: {self.current_segment_repeat_count + 1}/{adjusted_max_repeats}")
 
             # 更新字幕显示（确保普通模式和跟读模式都显示）
             self.show_current_subtitle(subtitle)
@@ -5674,8 +6040,6 @@ class AudioPlayer:
                     self.is_playing = False
                     self.is_following_active = False  # 跟读流程需取消
                     self.is_playing_or_recording = False
-
-
                     self.toggle_play_button(enable=False)
                     self.toggle_navigation_buttons(enable=False)
                     return
@@ -5711,7 +6075,7 @@ class AudioPlayer:
 
             logging.info(f"段落播放开始 - 时间: {self.format_time(start_time)} -> {self.format_time(end_time)}")
             self.update_status(f"正在播放第 {self.current_segment + 1} 句 "
-                               f"(重复 {self.current_segment_repeat_count + 1}/{self.max_segment_repeats})", 'info')
+                               f"(重复 {self.current_segment_repeat_count + 1}/{adjusted_max_repeats})", 'info')
 
         except Exception as e:
             logging.error(f"播放段落失败: {e}")
@@ -6069,7 +6433,6 @@ class AudioPlayer:
         except Exception as e:
             logging.error(f"朗读最后一句中文失败: {e}")
 
-
 class TextEditorWindow:
     def __init__(self, parent, player):
         print("Initializing TextEditorWindow")
@@ -6089,12 +6452,20 @@ class TextEditorWindow:
         self.text_frame = ttk.Frame(self.window)
         self.text_frame.pack(fill="both", expand=True, padx=10, pady=5)
 
-        # 文本编辑区
-        self.text_editor = tk.Text(self.text_frame, wrap=tk.WORD)
+        # 文本编辑区，启用撤销功能
+        self.text_editor = tk.Text(self.text_frame, wrap=tk.WORD, undo=True, maxundo=-1)
         self.text_editor.pack(fill="both", expand=True)
 
         # 绑定文本修改事件
         self.text_editor.bind("<<Modified>>", self.on_text_modified)
+
+        # 绑定快捷键（增强默认行为）
+        self.text_editor.bind("<Control-a>", self.select_all)
+        self.text_editor.bind("<Control-z>", lambda e: self.text_editor.edit_undo())
+        self.text_editor.bind("<Control-y>", lambda e: self.text_editor.edit_redo())
+        self.text_editor.bind("<Control-c>", lambda e: self.text_editor.event_generate("<<Copy>>"))
+        self.text_editor.bind("<Control-x>", lambda e: self.text_editor.event_generate("<<Cut>>"))
+        self.text_editor.bind("<Control-v>", lambda e: self.text_editor.event_generate("<<Paste>>"))
 
         # 加载已保存的文本
         self.load_text()
@@ -6113,7 +6484,7 @@ class TextEditorWindow:
         """当文本被修改时，标记为已修改"""
         if self.text_editor.edit_modified():
             self.is_modified = True
-            # print(f"Text modified, is_modified set to True")
+            print(f"Text modified, is_modified set to True")
         self.text_editor.edit_modified(False)  # 重置修改标志
 
     def save_text(self):
@@ -6169,6 +6540,8 @@ class TextEditorWindow:
                 self.text_editor.insert("1.0", text)
                 # 重新启用修改事件
                 self.text_editor.bind("<<Modified>>", self.on_text_modified)
+                # 重置撤销栈
+                self.text_editor.edit_reset()
             self.is_modified = False
             print(f"Text loaded, is_modified set to False")
         except Exception as e:
@@ -6182,13 +6555,22 @@ class TextEditorWindow:
             self.text_editor.delete("1.0", "end")
             # 重新启用修改事件
             self.text_editor.bind("<<Modified>>", self.on_text_modified)
+            # 重置撤销栈
+            self.text_editor.edit_reset()
             self.is_modified = True
             print(f"Text cleared, is_modified set to True")
 
+    def select_all(self, event=None):
+        """全选文本"""
+        self.text_editor.tag_add("sel", "1.0", "end-1c")
+        self.text_editor.mark_set("insert", "1.0")
+        self.text_editor.see("insert")
+        return "break"  # 阻止默认行为
+
     def on_closing(self):
         """关闭窗口前检查是否需要保存"""
-        # print("Closing TextEditorWindow")
-        # print(f"is_modified before closing: {self.is_modified}")
+        print("Closing TextEditorWindow")
+        print(f"is_modified before closing: {self.is_modified}")
         if self.is_modified:
             # 如果文本被修改，提示是否保存
             response = messagebox.askyesnocancel("未保存的更改", "文本已修改，是否保存更改？")
@@ -6205,7 +6587,7 @@ class TextEditorWindow:
             self.window.destroy()
         # 清理引用，防止下次打开时引用已销毁的窗口
         self.player.text_editor_window = None
-        # print("TextEditorWindow closed and reference cleared")
+        print("TextEditorWindow closed and reference cleared")
 
 
 def main():
